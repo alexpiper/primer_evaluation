@@ -5,6 +5,10 @@ date: "09/08/2019"
 output: html_document
 ---
 
+# Introduction
+
+
+## Load packages
 ```{r setup}
 ## Load Necessary packages
 sapply(c("rentrez", "bold", "taxize","taxizedb", "usethis", "tidyverse", "spider", "insect", "ape", "DECIPHER", "ggpubr", "RColorBrewer", "plotly", "ggforce", "seqinr", "shortread", "patchwork", "viridis","ggridges","UpSetR"), require, character.only = TRUE)
@@ -13,10 +17,6 @@ sapply(c("rentrez", "bold", "taxize","taxizedb", "usethis", "tidyverse", "spider
 # install.packages("devtools")
 devtools::install_github("alexpiper/taxreturn")
 library(taxreturn)
-
-# set your working directory
-#setwd("C:/Users/ap0y/Dropbox/Work Projects/PHD/Metabarcoding/primer_design")
-
 
 ## Get an NCBI api key for taxize queries
 # use_entrez()
@@ -114,12 +114,6 @@ ncbi_failed <- names(ncbi_search)[which(is.na(ncbi_search))]
 length(ncbi_failed)
 gbif_search <- tryCatch(taxize::classification(ncbi_failed, db="gbif",ask=FALSE, verbose = FALSE),warning=function(w) NULL )
 
-#Query ITIS using online search for those not in NCBI or GBIF taxonomy
-#gbif_failed <- names(gbif_search)[which(is.na(gbif_search))]
-#length(gbif_failed)
-#itis_search <- tryCatch(taxize::classification(gbif_failed, db="itis",ask=FALSE,  verbose = FALSE),warning=function(w) NULL )
-#itis_failed <- names(itis_search)[which(is.na(itis_search))]
-
 #Merge all taxonomies and remove NA's
 taxranks <- c(ncbi_search,gbif_search)
 taxranks <- taxranks[which(!is.na(taxranks))]
@@ -147,13 +141,6 @@ dat.new <- dplyr::bind_rows(ranklist) %>%
   filter(Class=="Insecta") %>%
   select(-Query) %>%
   drop_na()
-
-#Resolve synonyms! - not yet working
-#See - https://gist.github.com/sckott/c1e2cb547d9f22bd314da50fe9c7b503
-# https://github.com/ropensci/taxize/issues/533
-# 
-#syn <- synonyms(unique(dat.new$Species[1:10]), db="itis")
-
 
 #Upset plot of species share between the different databases
 
@@ -204,59 +191,27 @@ p.ord <- group_by(dat.new, Order) %>%
 
 p.ord
 
+#Write out final list of pests 
+write_csv(dat.new, "pestlist.csv")
 
-#Write out final list of pests for download
-writeLines(text = unique(dat.new$Family), con = "pest_insecta_complete_famlist.txt", sep = "\n", useBytes = FALSE)
 ```
 
 
-#Download and curate data for all insects
+## Download and curate data for all insecta
 
-```{r example, eval=FALSE, include=FALSE}
-devtools::install_github("alexpiper/taxreturn")
-library(taxreturn)
+```{r retrieve sequences, eval=FALSE, include=FALSE}
 
-## Fetch sequences from GenBank - Might also be good having an output="all" option
-fetchSeqs("Insecta", database="genbank",downstream=TRUE,quiet=FALSE, downto="Family", marker="COI OR COI OR COX1 OR COXI", output = "gb-binom",compress=FALSE, cores=3)
-
-#Note - Chrysomelidae keeps failing 
-
-#Check if all downloaded
-
-taxon <- dplyr::bind_rows(taxizedb::downstream("Insecta", db = "ncbi")) %>%
-    dplyr::filter(rank == stringr::str_to_lower("Family"))
-
-
-fetchSeqs(failed, database="genbank",downstream=FALSE,quiet=FALSE, downto="Family", marker="COI OR COI OR COX1 OR COXI", output = "gb-binom",compress=FALSE, cores=1)
-
+## Fetch sequences from GenBank 
+genbank <- fetchSeqs("Insecta", database="genbank",downstream=TRUE,quiet=FALSE, downto="Species", marker="COI OR COI OR COX1 OR COXI", output = "gb-binom",compress=FALSE, cores=3)
 
 ## Fetch sequences from BOLD
-fetchSeqs("Insecta", database="bold",downstream=TRUE,quiet=FALSE, downto="Family", marker="COI-5P", output = "gb-binom",compress=FALSE, cores=1)
+bold <- fetchSeqs("Insecta", database="bold",downstream=TRUE,quiet=FALSE, downto="Species", marker="COI-5P", output = "gb-binom",compress=FALSE, cores=3)
 
-taxon <- dplyr::bind_rows(taxizedb::downstream("Insecta", db = "ncbi")) %>%
-    dplyr::filter(rank == stringr::str_to_lower("Family"))
+```
 
-done <- list.files(path="bold",pattern=".fa") %>%
-  stringr::str_split_fixed(pattern="_",n=2) %>%
-  dplyr::as_tibble() %>%
-  dplyr::pull(V1)
+## Clean sequences
 
-failed <- taxon$childtaxa_name[which(!taxon$childtaxa_name %in% done)]
-
-fetchSeqs(failed, database="bold",downstream=FALSE,quiet=FALSE, downto="Family", marker="COI-5P", output = "gb-binom",compress=FALSE, cores=1)
-
-
-#read in all fastas and merge
-gbSeqs <-  readDNAStringSet(sort(list.files("genbank", pattern = ".fa", full.names = TRUE)))
-boldSeqs <-  readDNAStringSet(sort(list.files("bold", pattern = ".fa", full.names = TRUE)))
-mergedSeqs <- append(gbSeqs, boldSeqs, after=length(gbSeqs))
-uniqSeqs <- mergedSeqs[unique(names(mergedSeqs)),] # Remove those sequnce names that are identical across both databases
-
-
-#Need to have a filter that removes degenerate bases in reads!  
-
-#Filter using hidden markov model
-
+```{r Clean sequences}
 #build PHMM from midori longest - sequences need to be same length
 midori <-  Biostrings::readDNAStringSet("MIDORI_LONGEST_20180221_COI.fasta")
 insecta_midori <- as.DNAbin(midori[str_detect(names(midori),pattern=";Insecta;"),])
@@ -268,104 +223,361 @@ filt <- folmer[lengths(folmer)==658]
 folmer_curated <-  ape::read.dna("folmer_insecta_fullength_aligned_curated.fa",format="fasta")
 model <- aphid::derivePHMM(folmer_curated)
 
-#Clean taxa
+#read in all fastas and merge
+library(Biostrings)
+gbSeqs <-  readDNAStringSet(sort(list.files("genbank", pattern = ".fa", full.names = TRUE)))
+boldSeqs <-  readDNAStringSet(sort(list.files("bold", pattern = ".fa", full.names = TRUE)))
+mergedSeqs <- append(gbSeqs, boldSeqs, after=length(gbSeqs))
+uniqSeqs <- mergedSeqs[unique(names(mergedSeqs)),] # Remove those sequnce names that are identical across both databases
 
-#Should be able to speed up function by including the shave call within the first viterbii. Current problem is it needs to call viterbi twice
-testSeqs <-  Biostrings::readDNAStringSet("test_set.fa")
-filtered <- clean_seqs(testSeqs, model,minscore = 100, cores=2, shave=TRUE,maxNs = 0)
-
-#Get unique sequences only
-duplicates <- insect::duplicated.DNAbin(filtered, point = TRUE)
-filtered <- insect::subset.DNAbin(filtered, subset = !duplicates)
-
-#Save old names into attributes
-attributes(filtered)$oldnames <- names(filtered)
-#Get names in format for insect::purge
-names(filtered) <- names(filtered) %>%
-  str_split_fixed(";",n=2) %>%
-  as_tibble() %>%
-  pull("V1") 
+filtered <- clean_seqs(uniqSeqs, model,minscore = 100, cores=2, shave=TRUE,maxNs = 0)
 
 
 #filter using insect::purge - Could wrap this in a function for ease of use?
 db <- insect::taxonomy(db = "NCBI", synonyms = TRUE)
+#filter db
 
-#test <- insect::prune_taxonomy(db,taxIDs =6656, keep=TRUE)
-#Prune to arthropod only
-#db <- insect::prune_taxonomy(db,taxIDs =6656)
+db <- db %>%
+  filter(!rank %in% c("varietas","subspecies","species subgroup")) %>%
+  dplyr::filter(!str_detect(name, fixed("sp."))) %>%
+  dplyr::filter(!str_detect(name, fixed("spp."))) %>%
+  dplyr::filter(!str_detect(name, fixed("aff."))) %>%
+  dplyr::filter(!str_detect(name, fixed("nr."))) %>%
+  dplyr::filter(!str_detect(name, fixed("bv."))) %>%
+  dplyr::filter(!str_detect(name, fixed("cf."))) %>%
+  dplyr::filter(!str_detect(name, fixed("nom."))) %>%
+  dplyr::filter(!str_detect(name, fixed("nud."))) %>%
+  dplyr::filter(!str_detect(name, fixed("environment"))) %>%
+  dplyr::filter(!str_detect(name, fixed("undescribed"))) %>%
+  dplyr::filter(!str_detect(name, fixed("unverified"))) %>%
+  dplyr::filter(!str_detect(name, fixed("unclassified"))) %>%
+  dplyr::filter(!str_detect(name, fixed("uncultured"))) %>%
+  dplyr::filter(!str_detect(name, fixed("unidentif"))) %>%
+  dplyr::filter(!str_detect(name, fixed("NA"))) %>%
+  dplyr::filter(!str_detect(name, fixed("error"))) %>% 
+  dplyr::filter(!str_detect(name,"[0-9]"))%>% 
+  dplyr::filter(!str_detect(name,"[:punct:]"))
+
+
+filtered <- ape::read.FASTA(gzfile("Sequences/filtered.fa.gz"))
+
+remove <- names(filtered)  %>% 
+  str_split_fixed(";", n = 2) %>% 
+  as_tibble() %>%
+  filter(V2 %in% db$name) %>%
+  unite(names,c("V1","V2"),sep=";")
+
+subset <- filtered[names(filtered) %in% remove$names]
+
+rm(filtered)
+
+resolved <- resolve_synonyms(subset, subspecies=FALSE, quiet=FALSE, missing="ignore", higherrank=FALSE, fuzzy=TRUE)
+
+insect::writeFASTA(resolved, file="Sequences/resolved.fa.gz",compress=TRUE)
+
+#Check differences in names
+length(names(resolved)[which(!names(resolved) %in% names(subset))])
+rm(subset)
+
+#Save old names into attributes
+attributes(resolved)$oldnames <- names(resolved)
+#Get names in format for insect::purge
+names(resolved) <- names(resolved) %>%
+  str_split_fixed(";",n=2) %>%
+  as_tibble() %>%
+  pull("V1") 
+
+#filter using insect::purge - Could wrap this in a function for ease of use?
+#db <- insect::taxonomy(db = "NCBI", synonyms = TRUE)
 
 #get unique names only
-dupnames <- duplicated(names(filtered))
-filtered <- insect::subset.DNAbin(filtered, subset = !dupnames)
+resolved <- insect::subset.DNAbin(resolved, subset = !duplicated(names(resolved)))
 
-purged  <- insect::purge(filtered, db = db, level = "species", confidence = 0.2,
-                  threshold = 0.99, method = "farthest")
-
-#Filter the database
-db <- db %>% 
-  filter(!str_detect(name,"sp\\.")) %>%
-  filter(!str_detect(name,"[^[:alnum:]]")) %>% # remove special characters
-  filter(!str_detect(name,"[-]?[0-9]+[.]?[0-9]*|[-]?[0-9]+[L]?|[-]?[0-9]+[.]?[0-9]*[eE][0-9]+"))
-
+purged  <- insect::purge(resolved, db = db, level = "Genus", confidence = 0.8, threshold = 0.97, method = "farthest")
 
 #Restore old names
 names(purged) <- attributes(purged)$oldnames
+insect::writeFASTA(purged,file="Sequences/purged.fa.gz",compress=TRUE)
 
-#Prune group sizes down to 5 #Add a discardby=Random, or discardby=Length to the  function
-pruned <- prune_groups(purged,maxGroupSize = 3, removeby="length", quiet = FALSE)
+##### PRUNE GROUP SIZES
 
-pruned <-  Biostrings::readDNAStringSet("pruned.fa")
+purged <- readFASTA("Sequences/purged.fa.gz")
 
-#Check alignments
-filt_aligned <- pruned %>% as.character %>% lapply(.,paste0,collapse="") %>% unlist %>% DNAStringSet
-filt_aligned <- AlignSeqs(filt_aligned)
-BrowseSeqs(filt_aligned)
+#Prune group sizes down to 5 - Is de-duplication actually a good thing? this may bias towards bad singleton sequences?
+pruned <- prune_groups(purged,maxGroupSize = 5, discardby="length",dedup=TRUE, quiet = FALSE)
 
-#Filter out misannotated terms and species that arent binomials - Maybe this can be done during groups as well?
-filtseqs <- filter_taxa(mergedseqs,minlength=200,maxlength=1000,unique=TRUE,binomials=TRUE, removeterms=c("sp.","cf.","NA"))
+#Change to complete taxonomic heirarchy
+pruned <- reformat_heirarchy(pruned, ranks = c("kingdom","phylum", "class", "order", "family", "genus", "species"), quiet=FALSE)
 
+#Convert to DNAStringset
 
-#Merge in inhouse sequences
-merged <-  readFASTA("merged_cleaned.fa")
-inhouse <- readFASTA("inhouse/Inhouse_taxonomy_trimmed.fasta")
+pruned <-  pruned %>% as.character %>% lapply(.,paste0,collapse="") %>% unlist %>% DNAStringSet
+alphabetFrequency(pruned, collapse=TRUE)
 
-merged2 <- join(merged, inhouse)
-writeFASTA(merged2,"merged_cleaned_inhouse.fa")
+pruned <- replaceAmbiguities(pruned,new="N")
+pruned <- clean(pruned)
 
-#write out format for training
-
-#format_ref function
-
-#Trim to primer region using virtualPCR from insect package
-amplicon <- virtualPCR(filtseqs, up = "ACWGGWTGRACWGTNTAYCC",down= "ARYATDGTRATDGCHCCDGC",cores=3, rcdown = TRUE, trimprimers = TRUE)
-writeFASTA(amplicon,"gb_trimmed.fa")
+writeXStringSet(pruned, filepath="Sequences/pruned.fa.gz",compress = TRUE, format = "fasta" )
 
 ```
 
 
+## Subset to pests
 
-Write the families out as taxlist.txt and read back in
+```{r Subset to pests}
+pestlist <- read_csv("pestlist.csv") %>%
+  pull(Family) %>%
+  unique()
+seqs <- readFASTA("Sequences/pruned.fa.gz")
 
-# Download all COI sequences from genbank and BOLD
+dir.create("Sequences/pests/")
 
-Use the new code from taxreturn r package
+pass <- data.frame(name=pestlist, pre=0, post=0, size=0)
 
-Part 1 - Find diagnostic mini-barcode within COI
+for (i in 1:length(pestlist)){
+  query <- pestlist[i]
+  names <- names(seqs)  %>% 
+    str_split_fixed(";", n = 8) %>% 
+    as_tibble() %>% 
+    filter(V6 == query) %>%
+    unite(names,paste0("V",1:8),sep=";")
+          
+  subset <- seqs[names(seqs) %in% names$names]
+  if (length(subset) > 0){
+    #Get highest occuring length
+    size <- as.data.frame(table(lengths(subset))) %>%
+    arrange(desc(Freq))%>%
+    slice(1) %>%
+    pull(Var1) %>%
+    as.character()
+  
+    lengthfilt <- subset[lengths(subset)==size]
+    pass$pre[i] <- length(subset)
+    pass$post[i] <- length(lengthfilt)
+    pass$size[i] <- size
+    print(paste0(length(lengthfilt), " sequences of ",size ," bp kept from ", length(subset), " total for ", pestlist[i]))
+    
+    ##Remove high-distance outliers - only for those where there are at least 10 species
+    sppnames <- names(lengthfilt) %>% str_split_fixed(";", n = Inf) %>% as_tibble() %>%
+      pull(paste0("V",(ncol(.) -1)))
+
+    if (length(sppnames) > 10){ 
+    dist <- DistanceMatrix(lengthfilt %>% as.character %>% lapply(.,paste0,collapse="") %>% unlist %>% DNAStringSet, verbose=FALSE)
+    #Define outliers as 1.5* the dist from the 3rd quartile
+    rem <- colnames(dist)[which(dist[,1] > (summary(dist[,1])[["3rd Qu."]] * 1.5))]
+    
+    lengthfilt <- lengthfilt[!names(lengthfilt) %in% rem]
+    }
+    if (length(lengthfilt) > 0){insect::writeFASTA(lengthfilt,file=paste0("Sequences/pests/", pestlist[i],".fa.gz"),compress=TRUE)}
+  }
+}
+
+## Might need to remove those with too low sequences to run the sliding window script. Need to also check the amount of pass vs fails, maybe do a plot?
+##Plot pass vs fails
+
+gg.pass <- pass %>%
+  gather(type,value, -name, -size) %>%
+  #arrange(desc(value)) %>%
+  mutate(name = fct_reorder(name, -value))%>%
+  ggplot(aes(x=name,y=value,fill=type))+
+  geom_bar(stat="identity", position="dodge") +
+  theme(axis.text.x = element_text(angle=90))
+
+```
+
+# Get sequence entropy
 
 
-Folmer primers
-LCO <- "GGTCAACAAATCATAAAGATATTGG"
-HCO <- "TGATTTTTTGGTCACCCTGAAGTTTA"
+Maybe only consider those with above 100 sequences for this analysis - and possibly 
+
+
+Here, information content is defined by the relative entropy of a column in the alignment (Yu et al., 2015), which is higher for conserved columns. The relative entropy is based on the background distribution of letter-frequencies in the alignment.
+
+```{r entropy}
+path <- "Sequences/pests/" # CHANGE ME to the directory containing all downloaded bold CSV files
+vec <- sort(list.files(path, pattern = ".fa.gz", full.names = TRUE)) # Read fasta filenames
+length(vec)
+
+names <- vec %>%
+  str_replace(".fa.gz","") %>%
+  str_replace(".fa","") %>%
+  str_split_fixed("/", n = 3) %>%
+  as_tibble() %>%
+  pull(V3)
+
+i=1
+dat <- vector("list",length=length(vec))
+con_list <- vector("list",length=length(vec))
+if(file.exists("Sequences/consensus.fa.gz"))(file.remove("Sequences/consensus.fa.gz"))
+for (i in 1:length(vec)) {
+  file <- vec[i]
+  seqs <- readDNAStringSet(file)
+  
+  #Insert gap positions
+  
+  
+  
+  values <- as_tibble(cbind(names[i], MaskAlignment(seqs, type="values",windowSize=1))) %>%
+    rename(Family = `names[i]`) %>%
+    mutate(Family = as.character(Family)) %>%
+    mutate(pos = rownames(.))
+  dat[[i]] <- values
+  
+  #Get consensus only for those with >100 sequences
+  
+  if(length(seqs) > 2){
+  con <- DNAStringSet(paste(consensus(as.matrix(seqs), method="majority"), collapse=""))
+  names(con) <- names[i]
+  writeXStringSet(con, filepath="Sequences/consensus.fa.gz",append=TRUE, compress=TRUE, )
+  }
+}
+
+#Reorder by taxonomic order - collapse rare orders
+pestlist <- read_csv("pestlist.csv") %>%
+  select(Order, Family) %>%
+  unique() %>%
+  mutate(Order = case_when(
+    !Order %in% c("Coleoptera","Diptera",
+                 "Hymenoptera","Hemiyptera","Lepidoptera") ~ "Other",
+    TRUE ~ Order
+  ))
+
+#Set moving average function - Adjust smoothing (n=5?)
+ma <- function(x,n=5){stats::filter(x,rep(1/n,n), sides=2)}
+
+ent <- bind_rows(dat) %>%
+  dplyr::select(Family, entropy, pos) %>%
+  mutate(ma = as.numeric(ma(entropy, n = 5)) %>%
+          replace_na(0)) %>%
+  left_join(pestlist, by="Family") %>%
+  arrange(Order)
+
+#Try align to model
+folmer_curated <-  ape::read.dna("folmer_insecta_fullength_aligned_curated.fa",format="fasta")
+model <- aphid::derivePHMM(folmer_curated)
+con_seqs <- readFASTA("Sequences/consensus.fa.gz")
+
+aligned <- aphid::align(con_seqs, model=model)
+
+test <- aligned %>% as.list %>% as.character %>% lapply(.,paste0,collapse="") %>% unlist %>% DNAStringSet()
+
+test2 <- as.matrix(test)
+
+det <- str_detect(as.character(test2[1,]), pattern="-")
+dimnames(test2)[which %in% det]
+match("-", as.character(test2[1,]))
+
+ranges <- MaskAlignment(seqs, type="ranges", threshold=0, maxFractionGaps = 0.2, showPlot = TRUE) # Mask columns with majority gaps - caused 
+seqs <- replaceAt(seqs, ranges) # remove the masked columns
+
+
+browse <-  aligned %>% as.list %>% as.character %>% lapply(.,paste0,collapse="") %>% unlist %>% DNAStringSet()
+BrowseSeqs(browse)
+
+##Ridge Plot
+gg.ridge <- ggplot(ent, aes(x = as.numeric(pos), y=Family,height=ma, group=Family, fill=ma)) + 
+  geom_density_ridges_gradient(stat= "identity", scale = 5,size=0.1) +
+  scale_fill_viridis(option="C") +
+  theme_pubclean() +    
+  theme(legend.position = "none") +
+          ylab("Family of pest insects") +
+  xlab("Position within COI folmer region") +
+  scale_x_continuous(limits = c(-10, 658),breaks=seq(0,600,50),expand=c(0,0))  +
+ #geom_point(data=ent[ent$pos==1,],aes(x=pos220, y=Family), size = 1,color="white",alpha=0.5) +
+ #geom_point(aes(x=-5,y=Family,colour=as.numeric(log(species)))) +
+  facet_grid(Order~., space="free",scales="free_y") 
+
+```
+
+
+Is there anyway to do an entropy measurement, or consensus alignment or something across the entire family list to remove the problem of having different length sequences
+
+
+# Find diagnostic mini-barcode within COI
+
+Could we do sliding window with a clustered database? use kmer package to cluster? - then select the longest sequence
+
+Or is it worth doing a coarse entropy
+
+```{bash slurmjobscript }
+echo "Create individual R files for each fasta, and Sbatch job files"
+loc=$(pwd)
+TMPDIR=\$TMPDIR
+host=\hostname
+
+mkdir $loc/output/
+  
+  ls pests | sed -e '1p' -e '/.fa.gz/!d' | sort > test_ls_2
+
+
+declare -i files
+let files=$(grep -c ".fa.gz" test_ls_2)
+echo "#qsub file to run all slurm files" > queue_all_jobs
+
+###Make the header for the qsub files
+echo "#!/bin/bash
+#SBATCH --job-name r_slidingwin
+#SBATCH --nodes=1
+#SBATCH --ntasks=4
+#SBATCH --mem=120GB 
+#SBATCH --time=96:00:00
+
+echo '$host'
+echo $TMPDIR
+
+cd $TMPDIR
+mkdir job_dir
+cd job_dir" > script_header
+
+###Set variables & start while loop
+
+declare -i x
+x=1
+
+
+##Start while loop
+
+while [ $x -le $files ] 
+do
+
+
+##Make individual R script files	
+read_file=$(sed -n "${x}p" test_ls_2)
+sample=$(echo $read_file | awk -F . '{print $1}' )
+
+echo "file = '$read_file'" > R_header
+
+cat R_header base_sw.R > sw$sample.R
+
+
+##Create Job submission files
+
+echo "cp $loc/pests/$read_file .
+	cp $loc/sw$sample.R .
+
+#Load modules and run R scripts
+module load R/3.5.1-intel-2019a
+Rscript sw$sample.R
  
-Degenerated folmer primers for trimming
-"CAYAARGAYATTGG"
-"TGRTTYTTYGGHCA"
+cp *.rds $loc/output/. " > temp_slurm_file
 
-Following final checks, gaps were removed, all sequences that were not the same length as the longest sequence were removed, sequences were pruned again to only 3 representative for each species in order to minimize computation. and aligned again
+###assembling components into queue all jobs file
 
-Sequences were then checked a final time to remove any names that did not represent genus species binomials
+cat script_header temp_slurm_file > QA_swscript_$sample.slurm
+echo "sbatch QA_swscript_$sample.slurm" >> queue_all_jobs
+echo "rm QA_swscript_$sample.slurm" >> queue_all_jobs
 
-May be further useful to use alignment cleaning scripts from:  Bylemans and co-authors entitled "Towards an ecoregion scale evaluation of eDNA metabarcoding primers: a case-study for the freshwater fish biodiversity of the Murray-Darling Basin (Australia)."         
+let x=x+1
+done
+#Cleanup
+rm script_header
+rm temp_slurm_file
+rm test_ls_2
+rm R_header
+
+echo "Queue files made. Please run queue_all_jobs script"
+
+```
 
 # swscript
 ```{r}
@@ -374,22 +586,25 @@ library("ape")
 library("DECIPHER")
 library("Biostrings")
 library("tidyverse")
-library("ShortRead")
+library("insect")
 
-name <- file %>%
-  str_split_fixed(".filt", n = 2)
-name <- name[[1]]
+#files <- list.files(path="Sequences/pests/",pattern=".fa.gz",full.names = TRUE)
+#file <- files[3]
+
+name <- basename(file) %>%
+  str_replace(".fa.gz","")
 
 message(name)
 
-seqs <- read.FASTA(file)
+seqs <- readFASTA(file)
 
 seqs <- as.matrix(seqs)
 
 # Genus and species names
 aa <- Biostrings::strsplit(dimnames(seqs)[[1]], split = ";")
 Genus <- sapply(aa, function(x) paste(x[7], sep = "_"))
-Spp <- sapply(aa, function(x) paste(x[8], sep = "_"))
+Spp <- sapply(aa, function(x) paste(x[8], sep = "_")) %>%
+  str_replace(pattern="\\ ", replacement="_")
 
 slidelist <- list()
 # summary statistics
@@ -422,39 +637,6 @@ saveRDS(slidelist, file = paste0(name, "_windowlist.rds"))
 NOTE - Instead of plotting extra dots, could try changing the alpha of the segment between the optimal windows!
 
 ```{r Figure 1}
-path <- "Final/" # CHANGE ME to the directory containing all downloaded bold CSV files
-vec <- sort(list.files(path, pattern = ".fa", full.names = TRUE)) # Read fasta filenames
-length(vec)
-
-names <- vec %>%
-  str_split_fixed("/", n = 2)
-names <- names[, 2] %>%
-  str_split_fixed(".filt", n = 2)
-names <- names[, 1]
-
-i=1
-dat <- list()
-for (i in 1:length(vec)) {
-  file <- vec[i]
-  seqs <- readDNAStringSet(file)
-  values <- as.data.frame(cbind(names[i], MaskAlignment(seqs, type="values",windowSize=1)))
-  values$pos <- rownames(values)
-  dat[[i]] <- values
-}
-
-#Here, information content is defined by the relative entropy of a column in the alignment (Yu et al., 2015), which is higher for conserved columns. The relative entropy is based on the background distribution of letter-frequencies in the alignment.
-
-
-ent <- bind_rows(dat) %>%
-  subset(select=(c("names[i]","entropy","pos")))
-
-colnames(ent) <- c("family","entropy","pos")
-
-#Set moving average function - Adjust smoothing (n=5?)
-ma <- function(x,n=5){stats::filter(x,rep(1/n,n), sides=2)}
-
-ent$ma <- as.numeric(ma(ent$entropy))
-
 
 ##ADD OPTIMAL DIAGNOSTIC POSITION
 
@@ -462,20 +644,20 @@ path <- "output/" # CHANGE ME to the directory containing all downloaded bold CS
 vec <- sort(list.files(path, pattern = ".rds", full.names = TRUE)) # Read fasta filenames
 length(vec)
 
-rank220 <- list()
-rank420 <- list()
-primerent <- list()
+rank220 <- vector("list",length=length(vec))
+rank420 <- vector("list",length=length(vec))
+primerent <- vector("list",length=length(vec))
 
 l <- 1
 for (l in 1:length(vec)) {
   dat <- readRDS(vec[l])
 
   rank220[[l]] <- rankSlidWin(dat[[2]])
-  rank420[[l]] <- rankSlidWin(dat[[3]])
-  primerent[[l]] <- dat[[5]][["dist_mean_out"]]
+#  rank420[[l]] <- rankSlidWin(dat[[3]])
+#  primerent[[l]] <- dat[[5]][["dist_mean_out"]]
 }
 
-#220bp
+#220bp - replace this with the newer unnest stuff
 sw_220 <- lapply(rank220, function(x) {
   x[[1]]
 })
@@ -504,8 +686,6 @@ sw_220 <- sw_220 %>%
   mutate(winend = position + 220)  %>%
   subset(select=c("family","position","winend"))
 colnames(sw_220) <- c("family","pos220","winend220")
-
-#%>%  subset(rank == 1)
 
 ent <- left_join(ent,unique(sw_220), by="family")
 
@@ -1084,8 +1264,49 @@ gg.coverage
 
 ```
 
-# Part 6 - Order Primers
+## Create taxonomic classifier
 
+
+```{r Create taxonomic classifier database}
+
+
+
+#Trim to primer region using virtualPCR from insect package
+amplicon <- virtualPCR(filtseqs, up = "ACWGGWTGRACWGTNTAYCC",down= "ARYATDGTRATDGCHCCDGC",cores=3, rcdown = TRUE, trimprimers = TRUE)
+writeFASTA(amplicon,"gb_trimmed.fa")
+
+```
+
+## Evaluate cleanseqs
+
+```{r cleanseqs eval}
+
+#Filtered was then aligned in MAFFT - mafft folmer_insecta_fullength.fa > folmer_insecta_fullength_aligned.fa
+#alignment was then manually curated in geneious primer
+folmer_curated <-  ape::read.dna("folmer_insecta_fullength_aligned_curated.fa",format="fasta")
+model <- aphid::derivePHMM(folmer_curated)
+
+seqs <- readDNAStringSet("test.fasta")
+
+eval <- seq(50,500,50)
+
+result_list <- vector("list", length(eval))
+
+for (i in 1:length(eval)){
+
+#remove non-homologous sequences
+
+#model <- data("model", package="taxreturn")
+load("C:/Users/ap0y/Dropbox/R/taxreturn/data/model.rda")
+result_list[[i]] <- clean_seqs(seqs, model,minscore = i, cores=2, shave=TRUE,maxNs = 0)
+print(eval[i])
+print(result_list[[i]])
+
+}
+
+out <- clean_seqs(seqs, model,minscore = 600, cores=1, shave=TRUE,maxNs = 0)
+
+```
 
 ```{r sessioninfo}
 sessionInfo(package = NULL)
