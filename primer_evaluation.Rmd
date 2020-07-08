@@ -1,8 +1,11 @@
 ---
-title: "primer_evaluation"
+title: "Primer evaluation"
+title: "Statistics"
 author: "Alexander Piper"
-date: "09/08/2019"
+date: "`r Sys.Date()`"
 output: html_document
+editor_options: 
+  chunk_output_type: console
 ---
 
 # Introduction
@@ -10,20 +13,66 @@ output: html_document
 
 ## Load packages
 ```{r setup}
-## Load Necessary packages
-sapply(c("rentrez", "bold", "taxize","taxizedb", "usethis", "tidyverse", "spider", "insect", "ape", "DECIPHER", "ggpubr", "RColorBrewer", "plotly", "ggforce", "seqinr", "shortread", "patchwork", "viridis","ggridges","UpSetR"), require, character.only = TRUE)
+#Set required packages
+.cran_packages <- c("usethis",
+                    "tidyverse",
+                    "spider", 
+                    "insect",
+                    "ape",
+                    "RColorBrewer",
+                    "seqinr",
+                    "patchwork",
+                    "ShortRead",
+                    "foreach",
+                    "doParallel",
+                    "TmCalculator",
+                    "castor",
+                    "furrr",
+                    "tictoc")
 
+.bioc_packages <- c("DECIPHER",
+                    "ggtree",
+                    "Biostrings")
 
-# install.packages("devtools")
+.inst <- .cran_packages %in% installed.packages()
+if(any(!.inst)) {
+   install.packages(.cran_packages[!.inst])
+}
+.inst <- .bioc_packages %in% installed.packages()
+if(any(!.inst)) {
+  if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+  BiocManager::install(.bioc_packages[!.inst], ask = F)
+}
+
+#Load all packages
+sapply(c(.cran_packages,.bioc_packages), require, character.only = TRUE)
+
+# Github packages
 devtools::install_github("alexpiper/taxreturn")
 library(taxreturn)
+library(PrimerMiner)
 
-## Get an NCBI api key for taxize queries
-# use_entrez()
+# SOurce internal functions
+source("R/helper_functions.R")
 
-# After generating your key set it as ENTREZ_KEY in .Renviron.
-# ENTREZ_KEY='1c0a0c4afa28448650a1450662a22c68f208'
-#usethis::edit_r_environ()
+# Define themes
+library(ggthemes)
+base_theme <- theme_minimal()+
+    theme(
+      strip.background = element_blank(),
+      #strip.background = element_rect(colour = "black", fill = "lightgray"),
+      strip.text = element_text(size=9, family = ""),
+      axis.text.x=element_text(angle=45,hjust=1,vjust=1),
+      axis.title.x=element_blank(),
+      plot.background = element_blank(),
+      text = element_text(size=9, family = ""),
+      axis.text = element_text(size=8, family = ""),
+      legend.position = "none",
+      panel.border = element_rect(colour = "black", fill=NA, size=0.5),
+      panel.grid = element_line(size = rel(0.5))
+      )
+
 ```
 
 # Assemble pest list
@@ -41,1123 +90,1736 @@ library(taxreturn)
 * http://www.europe-aliens.org - DONE
 
 ```{r Curate pest lists}
-datasets <- sort(list.files("pestlist/", pattern = ".csv", full.names = TRUE)) # Read CSV filenames
+dat <- list.files("primer_evaluation/pestlist/", pattern = ".csv", full.names = TRUE) %>%
+  purrr::set_names() %>%
+  map_dfr(read_csv, .id = "Source", col_types = cols("Species" = col_character())) %>%
+  mutate(Source = str_remove(basename(Source), pattern="\\.csv")) %>%
+  mutate(Species = Species %>%  
+           str_remove_all("ÿ") %>% #Resolve weird characters
+           iconv(from = 'UTF-8', to = 'ASCII//TRANSLIT')%>% 
+           str_remove_all("\\?") %>%
+           str_remove_all("\\((.*?)\\)") %>% # remove things between brackets ie: Hygromia (Hygromia) cinctella
+           str_squish() # remove excess whitespace
+         ) %>%
+  filter(str_count(Species, " ") > 0 ) %>% #Remove non-binomial 
+  separate(Species, into=c("Genus", "Species"), sep=" ", extra="merge") %>% # Fix duplicated genus names
+  mutate(Species = str_remove(Species, pattern=Genus) %>% str_squish()) %>%
+  unite(col=Species, Genus, Species, sep = " ") %>%
+  unique()
 
-#Merge datasets
+# Map to OTT taxonomy ids
+taxreturn::download_ott_taxonomy()
+dat_resolved <- dat %>% mutate(Species = map_to_ott(Species, dir="ott3.2", from="ncbi", resolve_synonyms=TRUE, filter_bads=TRUE, remove_na = TRUE, quiet=FALSE)) %>%
+  filter(!is.na(Species))
 
-#Remove old file
-if (file.exists("pestlist_merged.csv")) file.remove("pestlist_merged.csv")
-
-i=1
-for (i in 1:length(datasets)){
-  name <- datasets[i] %>% 
-    str_split("_")  %>%
-    extract2(1)  %>%
-    extract(2) %>% 
-    str_replace(".csv","")
-
-  dat <- read.csv(datasets[i])
-  dat$source <- name
-  write.table(dat, "pestlist_merged.csv", append=TRUE,sep=",", row.names=F, col.names=F)
-    #assign(paste0(name,".dat"),read.csv(datasets[i]))
-}
-
-dat <- read.csv("pestlist_merged.csv")
-colnames(dat) <- c("Species","Source")
-
-
-#clean data
-dat$Species <- dat$Species %>%
-  trimws(which="both") %>%
-  str_replace("ÿ","") %>% #remove weird artefact
-  str_replace("\\((.*?)\\)","") #Remove everything between 2 parentheses
-
-#Resolve taxonomic names - Problem, this is producing old synonyms
-names_resolved <- gnr_resolve(unique(dat$Species), best_match_only = TRUE, cannonical=TRUE,with_context = TRUE)
-
-#Split names into columns and remove those without genus_species binomials
-names_resolved <- names_resolved %>%
-  separate(matched_name,into=c("Genus","Species","Authority"), sep= " ") %>%
-  na_if("") %>%
-  filter(!is.na(Species)) %>%
-  unite(matched_name,Genus,Species,sep=" ")
-
-#Replace in loop
-
-for (i in 1:nrow(names_resolved)){
-  dat$Species <- dat$Species %>%
-    str_replace_all(pattern=names_resolved$user_supplied_name[i],replacement=names_resolved$matched_name[i])
-}
-
-#look at those names that were not found by gnr_resolve
-gnr_failed <- dat[which(!dat$Species %in% names_resolved$matched_name),]
-gnr_failed
-
-#Remove those that were not found by gnr_resolve
-dat <- dat[which(dat$Species %in% names_resolved$matched_name),]
-
-dat$Species <- dat$Species %>%
-  trimws(which="both") %>%
-  str_replace(pattern = "  ", replacement = " ")
-
-#Remove those without genus_species binomials
-dat <- dat %>% 
-  filter(str_detect(dat$Species," "))
-
-#Resolve higher taxonomic levels - here i am using the taxizedb package which downloads a local database, rather than taxize which queries the web. This can be changed to taxize::classificataion instead
-
-#Query NCBI taxonomy database locally using taxizedb 
-ncbi_search <- taxizedb::classification(unique(dat$Species), db='ncbi')
-
-#Query GBIF using online search for those not in NCBI taxonomy
-ncbi_failed <- names(ncbi_search)[which(is.na(ncbi_search))]
-length(ncbi_failed)
-gbif_search <- tryCatch(taxize::classification(ncbi_failed, db="gbif",ask=FALSE, verbose = FALSE),warning=function(w) NULL )
-
-#Merge all taxonomies and remove NA's
-taxranks <- c(ncbi_search,gbif_search)
-taxranks <- taxranks[which(!is.na(taxranks))]
-
-
-#Get desired items from lists 
-ranklist <- list()
-i=1
-for (i in 1:length(taxranks)) {
-  line <- as.tibble(t(rbind(taxranks[[i]])))
-  colnames(line) <- line[2, ]
-  if (!is.na(line)[1]){
-  line <- line %>% subset(select=which(!duplicated(names(.)))) %>% # drop duplicated `no rank` columns
-    select(one_of("class","order","family","genus","species")) %>%      # subset to columns if they exist
-    mutate(query = names(taxranks)[i]) %>%                      #add query row
-    slice(1)                                                    # only keep top row
-  ranklist[[i]] <- line
-  } else next
-}
-
-#Collapse list to dataframe and filter out non-insecta
-dat.new <- dplyr::bind_rows(ranklist) %>%
-  rename_all(funs(str_to_sentence(.))) %>% 
-  right_join(dat, by="Species") %>%
+lineage <- get_ott_lineage(dat_resolved$Species, dir="ott3.2")  %>%
+  bind_cols(dat_resolved) %>% 
+  select(-Species)%>%
+  rename_all(funs(str_to_sentence(.))) %>%
   filter(Class=="Insecta") %>%
-  select(-Query) %>%
   drop_na()
 
-#Upset plot of species share between the different databases
+#Write out final list of pests 
+write_csv(lineage, "primer_evaluation/pestlist.csv")
+```
 
-sources <- as.character(unique(dat.new$Source))
+## Figure 1
+
+```{r Figure 1}
+lineage <- read_csv(
+  "primer_evaluation/pestlist.csv",
+  col_types  = cols(
+  Acc = col_character(),
+  Kingdom = col_character(),
+  Phylum = col_character(),
+  Class = col_character(),
+  Order = col_character(),
+  Family = col_character(),
+  Genus = col_character(),
+  Species = col_character(),
+  Source = col_character()
+)) %>%
+  unique()
+
+# Fig 1a - Upset plot of species share between the different databases
+
+sources <- as.character(unique(lineage$Source))
 upsetlist <- list()
 for (i in 1:length(sources)){
-  upsetlist[[i]]= dat.new$Species[which(dat.new$Source==sources[i])] 
+  upsetlist[[i]]= lineage$Species[which(lineage$Source==sources[i])] 
   names(upsetlist)[[i]] <- sources[i]
 }
 
-upsetplot <- upset(fromList(upsetlist),nsets=length(upsetlist), order.by = "freq")
-upsetplot
+Fig1a <- upset(fromList(upsetlist),nsets=length(upsetlist), order.by = "freq")
+print(Fig1a)
 
-## Figure 1 - summary of families within the dataset 
+## Figure 1b - summary of families within the dataset 
 
 library(RColorBrewer)
-col <- colorRampPalette(brewer.pal(11, "Spectral"))(19)
+col <- colorRampPalette(brewer.pal(11, "Spectral"))(10)
 
-orderlist <- dat.new %>% 
-  select(Order,Family) %>%
-  unique()
-
-p.fam <- group_by(dat.new, Family) %>%
+Fig1b <- group_by(lineage, Order, Source) %>%
   summarise(Genus = n_distinct(Genus), Species = n_distinct(Species)) %>%
-  left_join(orderlist, by = "Family") %>%
-  mutate(Family = fct_reorder(Family,-Species))  %>%
-  ggplot(aes(x = Family, y = Species, fill = Order)) +
-  geom_bar(stat = "identity") +
-  theme_bw() +
-  theme(axis.text.x = element_blank(),
-        axis.ticks.x = element_blank()) +
-  scale_fill_manual(values=col) +
-  ggtitle("Distribution of species on pest lists by Family")
-
-p.fam
-
-#Summary of orders within the dataset
-
-p.ord <- group_by(dat.new, Order) %>%
-  summarise(Genus = n_distinct(Genus), Species = n_distinct(Species)) %>%
-  mutate(Order = fct_reorder(Order,-Species))  %>%
-  ggplot(aes(x = Order, y = Species, fill = Order)) +
-  geom_bar(stat = "identity") +
+  ungroup() %>%
+  mutate(Order = fct_reorder(Order, -Species)) %>% 
+  ggplot(aes(x = Order, y = Species, fill = Source)) +
+  geom_bar(stat = "identity")  +
   theme_pubr() +
   theme(axis.text.x = element_text(angle = 90, hjust = 1,vjust=0)) +
   scale_fill_manual(values=col) +
-  ggtitle("Distribution of species on pest lists by Order")
+  ylim(-500,2500) +
+  theme_minimal() +
+  theme(
+    axis.text = element_blank(),
+    axis.title = element_blank(),
+    panel.grid = element_blank(),
+    plot.margin = unit(rep(-1,4), "cm")      # Adjust the margin to make in sort labels are not truncated!
+  ) +
+  coord_polar(start=0) +
+  geom_text(data = . %>%
+              dplyr::select(Order, Species) %>%
+              group_by(Order) %>%
+              summarise(value = sum(Species)),
+            aes(x=Order, y=value + 20, label=Order),
+            color="black", fontface="bold", alpha=0.6, inherit.aes = FALSE)
 
-p.ord
+# Summaries for article text
 
-#Write out final list of pests 
-write_csv(dat.new, "pestlist.csv")
+# Unique taxa
+lineage %>% 
+  #select(-Source, Acc) %>%
+  summarise(Species = n_distinct(Species),
+            Genus = n_distinct(Genus),
+            Family = n_distinct(Family),
+            Order = n_distinct(Order),
+            )
 
+# Sum of reference DB's
+lineage %>% 
+  group_by(Source) %>%
+  summarise(Species = n_distinct(Species)) %>%
+  arrange(Species)
+
+# Proportion of sequences unique
+lineage %>%
+  add_count(Source, name = "DB_total") %>%
+  group_by(Species) %>%
+  add_tally(name = "n_occurances") %>%
+  ungroup() %>%
+  filter(n_occurances==1) %>%
+  group_by(Source, DB_total)%>%
+  summarise(n = n_distinct(Species)) %>%
+  mutate(freq = n / DB_total)%>%
+  arrange(freq)
 ```
 
+# Primer info
 
-## Download and curate data for all insecta
-
-```{r retrieve sequences, eval=FALSE, include=FALSE}
-
-## Fetch sequences from GenBank 
-genbank <- fetchSeqs("Insecta", database="genbank",downstream=TRUE,quiet=FALSE, downto="Species", marker="COI OR COI OR COX1 OR COXI", output = "gb-binom",compress=FALSE, cores=3)
-
-## Fetch sequences from BOLD
-bold <- fetchSeqs("Insecta", database="bold",downstream=TRUE,quiet=FALSE, downto="Species", marker="COI-5P", output = "gb-binom",compress=FALSE, cores=3)
-
-```
-
-## Clean sequences
-
-```{r Clean sequences}
-#build PHMM from midori longest - sequences need to be same length
-midori <-  Biostrings::readDNAStringSet("MIDORI_LONGEST_20180221_COI.fasta")
-insecta_midori <- as.DNAbin(midori[str_detect(names(midori),pattern=";Insecta;"),])
-folmer <- insect::virtualPCR(insecta_midori, up = "TITCIACIAAYCAYAARGAYATTGG",down= "TAIACYTCIGGRTGICCRAARAAYCA",cores=2, rcdown = TRUE, trimprimers = TRUE)
-filt <- folmer[lengths(folmer)==658]
-
-#Filtered was then aligned in MAFFT - mafft folmer_insecta_fullength.fa > folmer_insecta_fullength_aligned.fa
+```{r primer binding and constraints}
 #alignment was then manually curated in geneious primer
-folmer_curated <-  ape::read.dna("folmer_insecta_fullength_aligned_curated.fa",format="fasta")
+folmer_curated <-  ape::read.dna("reference/Folmer_insecta_fullength_withprime_curated.fa",format="fasta")
 model <- aphid::derivePHMM(folmer_curated)
 
-#read in all fastas and merge
-library(Biostrings)
-gbSeqs <-  readDNAStringSet(sort(list.files("genbank", pattern = ".fa", full.names = TRUE)))
-boldSeqs <-  readDNAStringSet(sort(list.files("bold", pattern = ".fa", full.names = TRUE)))
-mergedSeqs <- append(gbSeqs, boldSeqs, after=length(gbSeqs))
-uniqSeqs <- mergedSeqs[unique(names(mergedSeqs)),] # Remove those sequnce names that are identical across both databases
+# Be worth validating how the score is calculated?
+primers <- read_csv("primer_evaluation/primer_candidates.csv") %>%
+  select(name, strand, seq, citation, issues) %>%
+  left_join(.$seq %>% purrr::map(get_binding_position, model, tryrc = TRUE, minscore=8) %>%
+  bind_rows() %>%
+  rename(seq = primer), by="seq") %>%
+  unique()
 
-filtered <- clean_seqs(uniqSeqs, model,minscore = 100, cores=2, shave=TRUE,maxNs = 0)
+primers <- primers %>%
+  left_join(.$seq %>%
+  purrr::map_df(get_primer_statistics, metrics="all", disambiguate=TRUE))
 
-
-#filter using insect::purge - Could wrap this in a function for ease of use?
-db <- insect::taxonomy(db = "NCBI", synonyms = TRUE)
-#filter db
-
-db <- db %>%
-  filter(!rank %in% c("varietas","subspecies","species subgroup")) %>%
-  dplyr::filter(!str_detect(name, fixed("sp."))) %>%
-  dplyr::filter(!str_detect(name, fixed("spp."))) %>%
-  dplyr::filter(!str_detect(name, fixed("aff."))) %>%
-  dplyr::filter(!str_detect(name, fixed("nr."))) %>%
-  dplyr::filter(!str_detect(name, fixed("bv."))) %>%
-  dplyr::filter(!str_detect(name, fixed("cf."))) %>%
-  dplyr::filter(!str_detect(name, fixed("nom."))) %>%
-  dplyr::filter(!str_detect(name, fixed("nud."))) %>%
-  dplyr::filter(!str_detect(name, fixed("environment"))) %>%
-  dplyr::filter(!str_detect(name, fixed("undescribed"))) %>%
-  dplyr::filter(!str_detect(name, fixed("unverified"))) %>%
-  dplyr::filter(!str_detect(name, fixed("unclassified"))) %>%
-  dplyr::filter(!str_detect(name, fixed("uncultured"))) %>%
-  dplyr::filter(!str_detect(name, fixed("unidentif"))) %>%
-  dplyr::filter(!str_detect(name, fixed("NA"))) %>%
-  dplyr::filter(!str_detect(name, fixed("error"))) %>% 
-  dplyr::filter(!str_detect(name,"[0-9]"))%>% 
-  dplyr::filter(!str_detect(name,"[:punct:]"))
-
-
-filtered <- ape::read.FASTA(gzfile("Sequences/filtered.fa.gz"))
-
-remove <- names(filtered)  %>% 
-  str_split_fixed(";", n = 2) %>% 
-  as_tibble() %>%
-  filter(V2 %in% db$name) %>%
-  unite(names,c("V1","V2"),sep=";")
-
-subset <- filtered[names(filtered) %in% remove$names]
-
-rm(filtered)
-
-resolved <- resolve_synonyms(subset, subspecies=FALSE, quiet=FALSE, missing="ignore", higherrank=FALSE, fuzzy=TRUE)
-
-insect::writeFASTA(resolved, file="Sequences/resolved.fa.gz",compress=TRUE)
-
-#Check differences in names
-length(names(resolved)[which(!names(resolved) %in% names(subset))])
-rm(subset)
-
-#Save old names into attributes
-attributes(resolved)$oldnames <- names(resolved)
-#Get names in format for insect::purge
-names(resolved) <- names(resolved) %>%
-  str_split_fixed(";",n=2) %>%
-  as_tibble() %>%
-  pull("V1") 
-
-#filter using insect::purge - Could wrap this in a function for ease of use?
-#db <- insect::taxonomy(db = "NCBI", synonyms = TRUE)
-
-#get unique names only
-resolved <- insect::subset.DNAbin(resolved, subset = !duplicated(names(resolved)))
-
-purged  <- insect::purge(resolved, db = db, level = "Genus", confidence = 0.8, threshold = 0.97, method = "farthest")
-
-#Restore old names
-names(purged) <- attributes(purged)$oldnames
-insect::writeFASTA(purged,file="Sequences/purged.fa.gz",compress=TRUE)
-
-##### PRUNE GROUP SIZES
-
-purged <- readFASTA("Sequences/purged.fa.gz")
-
-#Prune group sizes down to 5 - Is de-duplication actually a good thing? this may bias towards bad singleton sequences?
-pruned <- prune_groups(purged,maxGroupSize = 5, discardby="length",dedup=TRUE, quiet = FALSE)
-
-#Change to complete taxonomic heirarchy
-pruned <- reformat_heirarchy(pruned, ranks = c("kingdom","phylum", "class", "order", "family", "genus", "species"), quiet=FALSE)
-
-#Convert to DNAStringset
-
-pruned <-  pruned %>% as.character %>% lapply(.,paste0,collapse="") %>% unlist %>% DNAStringSet
-alphabetFrequency(pruned, collapse=TRUE)
-
-pruned <- replaceAmbiguities(pruned,new="N")
-pruned <- clean(pruned)
-
-writeXStringSet(pruned, filepath="Sequences/pruned.fa.gz",compress = TRUE, format = "fasta" )
-
+write_csv(primers, "primer_evaluation/primer_candidates.csv")
 ```
 
+## Primer Presence in seqs
 
-## Subset to pests
+```{r check pres}
+primerHits <- function(primer, fn, max.mismatch=0, with.indels=FALSE) {
+      if(stringr::str_detect(primer, "I")) {
+        message(paste0("Warning: Inosine (I) bases detected in primer ", primer," these will be converted to N!"))
+        primer <- primer %>% str_replace_all("I", "N")
+        }
+    # Counts number of sequences in which the primer is found
+    nhits <- vcountPattern(primer, sread(readFasta(fn)), max.mismatch=max.mismatch, fixed = FALSE, with.indels = with.indels)
+    return(sum(nhits > 0))
+}
 
-```{r Subset to pests}
-pestlist <- read_csv("pestlist.csv") %>%
-  pull(Family) %>%
+primers <- read_csv("primer_evaluation/primer_candidates.csv") 
+
+fn="reference/merged_final.fa.gz"
+
+out <- vector("list", length=nrow(primers))
+for (i in 1:nrow(primers)){
+  
+  if(primers$strand[i] == "F"){
+    query <- primers$seq[i]
+    
+  } else  if(primers$strand[i] == "R"){
+    query <- rc(primers$seq[i])
+  }
+  print(i)
+  df <- tibble(
+    name = primers$name[i],
+    primer = query,
+    strand = primers$strand[i],
+    #Hamming distance (no indels in COI)
+    h0 = primerHits(query, fn, max.mismatch=0, with.indels=FALSE),
+    h1 = primerHits(query, fn, max.mismatch=1, with.indels=FALSE),
+    h2 = primerHits(query, fn, max.mismatch=2, with.indels=FALSE),
+  )
+  out[[i]] <- df
+}
+
+names(out) <- primers$seq
+out <- bind_rows(out)
+write_csv(out, "primer_evaluation/primer_presence.csv")
+
+# Plotting
+out <- read_csv("primer_evaluation/primer_presence.csv") %>% 
+  pivot_longer(cols=starts_with(c("h", "l")),
+               names_to = "measure",
+               values_to = "seqs"
+               ) %>%
+  filter(measure=="h2") %>%
+  mutate(name = factor(name)) %>%
+  arrange(name)
+
+gg.primerpresF <- out %>%
+  left_join(primers) %>%
+  filter(strand=="F") %>%
+    mutate(name = fct_reorder(name, seqs, .desc = TRUE)) %>%
+  ggplot(aes(x=name, y=seqs, fill=seqs)) + 
+  geom_bar(stat="identity", position="dodge") +
+  coord_flip() + 
+  labs(x="Forward Primers", y=NULL)  +
+  base_theme +
+  scale_fill_gradient(low = "firebrick", high = "darkslateblue", 
+                      na.value = "grey", oob = scales::squish) 
+
+gg.primerpresR <- out  %>%
+  left_join(primers) %>%
+  filter(strand=="R") %>%
+    mutate(name = fct_reorder(name, seqs, .desc = TRUE)) %>%
+  ggplot(aes(x=name, y=seqs, fill=seqs)) + 
+  geom_bar(stat="identity", position="dodge") +
+  coord_flip() + 
+  labs(x="Reverse Primers", y="# Sequences containing primers") +
+  base_theme +
+  scale_fill_gradient(low = "firebrick", high = "darkslateblue", 
+                      na.value = "grey", oob = scales::squish) 
+
+gg.primerpres <- gg.primerpresF / gg.primerpresR
+
+gg.primerpres
+
+pdf(file="fig/primerpres.pdf", width = 8, height = 11 , paper="a4")
+  plot(gg.primerpres)
+try(dev.off(), silent=TRUE)
+```
+
+# Primer placement
+
+## Whole alignment entropy
+```{r Align}
+# Get whole alignment entropy
+lengthfilt <- insect::readFASTA("reference/merged_final_aligned.fa.gz")
+
+ent <- taxreturn::alignment_entropy(lengthfilt, maskgaps=1, countgaps=FALSE, method="ML", unit="log")
+values <- as.data.frame(ent, stringsAsFactors=FALSE) %>%
+  rownames_to_column("pos") %>%
+  magrittr::set_colnames(c("pos", "value"))
+
+write_csv(values, "primer_evaluation/whole_alignment_entropy.csv")
+```
+
+## Entropy by order
+```{r subsetting}
+## Read in aligned & Subset to only fullength
+seqs <- insect::readFASTA("reference/merged_final_aligned.fa.gz")
+seqs <- seqs[lengths(seqs)==712]
+
+# querylevel
+queryrank <- "order"
+
+# Get unique querieranks
+queries <- names(seqs)  %>% 
+  str_split_fixed(";", n = 8) %>% 
+  as_tibble() %>% 
+  magrittr::set_colnames(c("acc", "kingdom", "phylum",
+                           "class", "order", "family", 
+                           "genus", "species")) %>%
+  filter(class=="Insecta") %>%
+  pull(queryrank) %>%
   unique()
-seqs <- readFASTA("Sequences/pruned.fa.gz")
 
-dir.create("Sequences/pests/")
+#Make lists to store everything
+entlist <- vector("list", length=length(queries))
+names(entlist) <- queries
 
-pass <- data.frame(name=pestlist, pre=0, post=0, size=0)
-
-for (i in 1:length(pestlist)){
-  query <- pestlist[i]
+for (i in 1:length(queries)){
+  print(i)
+  query <- queries[i]
+ print(query)
   names <- names(seqs)  %>% 
-    str_split_fixed(";", n = 8) %>% 
-    as_tibble() %>% 
-    filter(V6 == query) %>%
-    unite(names,paste0("V",1:8),sep=";")
-          
+  str_split_fixed(";", n = 8) %>% 
+  as_tibble() %>% 
+  magrittr::set_colnames(c("acc", "kingdom", "phylum",
+                           "class", "order", "family", 
+                           "genus", "species")) %>%
+    filter_at(vars(queryrank), any_vars(.== query)) %>%
+    unite(names,everything(),sep=";")
+  
   subset <- seqs[names(seqs) %in% names$names]
   if (length(subset) > 0){
-    #Get highest occuring length
-    size <- as.data.frame(table(lengths(subset))) %>%
-    arrange(desc(Freq))%>%
-    slice(1) %>%
-    pull(Var1) %>%
-    as.character()
-  
-    lengthfilt <- subset[lengths(subset)==size]
-    pass$pre[i] <- length(subset)
-    pass$post[i] <- length(lengthfilt)
-    pass$size[i] <- size
-    print(paste0(length(lengthfilt), " sequences of ",size ," bp kept from ", length(subset), " total for ", pestlist[i]))
+    nseqs <- length(subset)
+    message(nseqs, " sequences for ", query)
     
-    ##Remove high-distance outliers - only for those where there are at least 10 species
-    sppnames <- names(lengthfilt) %>% str_split_fixed(";", n = Inf) %>% as_tibble() %>%
-      pull(paste0("V",(ncol(.) -1)))
-
-    if (length(sppnames) > 10){ 
-    dist <- DistanceMatrix(lengthfilt %>% as.character %>% lapply(.,paste0,collapse="") %>% unlist %>% DNAStringSet, verbose=FALSE)
-    #Define outliers as 1.5* the dist from the 3rd quartile
-    rem <- colnames(dist)[which(dist[,1] > (summary(dist[,1])[["3rd Qu."]] * 1.5))]
-    
-    lengthfilt <- lengthfilt[!names(lengthfilt) %in% rem]
-    }
-    if (length(lengthfilt) > 0){insect::writeFASTA(lengthfilt,file=paste0("Sequences/pests/", pestlist[i],".fa.gz"),compress=TRUE)}
-  }
+    # Get entropies
+    ent <- taxreturn::alignment_entropy(as.list(subset), maskgaps=1, countgaps=FALSE, 
+                                        method="ML", unit="log")
+    entlist[[i]] <- as.data.frame(ent, stringsAsFactors=FALSE) %>%
+      rownames_to_column("pos") %>%
+      magrittr::set_colnames(c("pos", "value")) %>%
+      mutate(nseqs = nseqs)
+      }
 }
 
-## Might need to remove those with too low sequences to run the sliding window script. Need to also check the amount of pass vs fails, maybe do a plot?
-##Plot pass vs fails
-
-gg.pass <- pass %>%
-  gather(type,value, -name, -size) %>%
-  #arrange(desc(value)) %>%
-  mutate(name = fct_reorder(name, -value))%>%
-  ggplot(aes(x=name,y=value,fill=type))+
-  geom_bar(stat="identity", position="dodge") +
-  theme(axis.text.x = element_text(angle=90))
+ent_out <- bind_rows(entlist, .id="names")
+write_csv(ent_out,paste0("primer_evaluation/", queryrank,"_ent_out.csv"))
 
 ```
 
-# Get sequence entropy
-
-
-Maybe only consider those with above 100 sequences for this analysis - and possibly 
-
-
-Here, information content is defined by the relative entropy of a column in the alignment (Yu et al., 2015), which is higher for conserved columns. The relative entropy is based on the background distribution of letter-frequencies in the alignment.
-
+## Figure 2
 ```{r entropy}
-path <- "Sequences/pests/" # CHANGE ME to the directory containing all downloaded bold CSV files
-vec <- sort(list.files(path, pattern = ".fa.gz", full.names = TRUE)) # Read fasta filenames
-length(vec)
-
-names <- vec %>%
-  str_replace(".fa.gz","") %>%
-  str_replace(".fa","") %>%
-  str_split_fixed("/", n = 3) %>%
-  as_tibble() %>%
-  pull(V3)
-
-i=1
-dat <- vector("list",length=length(vec))
-con_list <- vector("list",length=length(vec))
-if(file.exists("Sequences/consensus.fa.gz"))(file.remove("Sequences/consensus.fa.gz"))
-for (i in 1:length(vec)) {
-  file <- vec[i]
-  seqs <- readDNAStringSet(file)
-  
-  #Insert gap positions
-  
-  
-  
-  values <- as_tibble(cbind(names[i], MaskAlignment(seqs, type="values",windowSize=1))) %>%
-    rename(Family = `names[i]`) %>%
-    mutate(Family = as.character(Family)) %>%
-    mutate(pos = rownames(.))
-  dat[[i]] <- values
-  
-  #Get consensus only for those with >100 sequences
-  
-  if(length(seqs) > 2){
-  con <- DNAStringSet(paste(consensus(as.matrix(seqs), method="majority"), collapse=""))
-  names(con) <- names[i]
-  writeXStringSet(con, filepath="Sequences/consensus.fa.gz",append=TRUE, compress=TRUE, )
-  }
-}
-
-#Reorder by taxonomic order - collapse rare orders
-pestlist <- read_csv("pestlist.csv") %>%
-  select(Order, Family) %>%
-  unique() %>%
-  mutate(Order = case_when(
-    !Order %in% c("Coleoptera","Diptera",
-                 "Hymenoptera","Hemiyptera","Lepidoptera") ~ "Other",
-    TRUE ~ Order
-  ))
+# Read in results
+values <- read_csv("primer_evaluation/order_ent_out.csv") %>% 
+  filter(nseqs > 20) # Filter to only those above 20 seqs
 
 #Set moving average function - Adjust smoothing (n=5?)
-ma <- function(x,n=5){stats::filter(x,rep(1/n,n), sides=2)}
+ma <- function(x, n=3){stats::filter(x, rep(1/n, n), sides=2)}
 
-ent <- bind_rows(dat) %>%
-  dplyr::select(Family, entropy, pos) %>%
-  mutate(ma = as.numeric(ma(entropy, n = 5)) %>%
-          replace_na(0)) %>%
-  left_join(pestlist, by="Family") %>%
-  arrange(Order)
+ent <- values %>%
+  mutate(value = value %>% 
+           na_if("") %>%
+           replace_na(0)) %>%
+  mutate(ma = ma(value, n = 3)) %>%
+  mutate(annot = case_when(
+    pos %in% seq(from=1, to=2, by=1) ~ "Loop 0",
+    pos %in% seq(from=3, to=78, by=1) ~ "Helix 1",
+    pos %in% seq(from=79, to=103, by=1)~ "Loop 1-2",
+    pos %in% seq(from=104, to=211, by=1)~ "Helix 2",    
+    pos %in% seq(from=212, to=235, by=1)~ "Loop 2-3",   
+    pos %in% seq(from=213, to=304, by=1)~ "Helix 3", 
+    pos %in% seq(from=305, to=373, by=1)~ "Loop 3-4", 
+    pos %in% seq(from=374, to=466, by=1)~ "Helix 4", 
+    pos %in% seq(from=467, to=499, by=1)~ "Loop 4-5", 
+    pos %in% seq(from=500, to=598, by=1)~ "Helix 5", 
+    pos %in% seq(from=599, to=634, by=1)~ "Loop 5-6", 
+    pos %in% seq(from=635, to=712, by=1)~ "Helix 6", 
+  )) %>%
+  mutate(structure = case_when(
+    str_detect(annot, "Helix") ~ "Helix",
+    str_detect(annot, "Loop") ~ "Loop",
+  ))  
 
-#Try align to model
-folmer_curated <-  ape::read.dna("folmer_insecta_fullength_aligned_curated.fa",format="fasta")
-model <- aphid::derivePHMM(folmer_curated)
-con_seqs <- readFASTA("Sequences/consensus.fa.gz")
+## plot entropy by order
+gg.line <- ent %>%
+  group_by(pos) %>%
+  mutate(median = median(ma)) %>%
+  ggplot(aes(x = pos, y=ma, colour=names)) + 
+  geom_line(aes(x = pos, y=ma),size=1, inherit.aes = FALSE) +
+  facet_wrap(~names)
 
-aligned <- aphid::align(con_seqs, model=model)
-
-test <- aligned %>% as.list %>% as.character %>% lapply(.,paste0,collapse="") %>% unlist %>% DNAStringSet()
-
-test2 <- as.matrix(test)
-
-det <- str_detect(as.character(test2[1,]), pattern="-")
-dimnames(test2)[which %in% det]
-match("-", as.character(test2[1,]))
-
-ranges <- MaskAlignment(seqs, type="ranges", threshold=0, maxFractionGaps = 0.2, showPlot = TRUE) # Mask columns with majority gaps - caused 
-seqs <- replaceAt(seqs, ranges) # remove the masked columns
-
-
-browse <-  aligned %>% as.list %>% as.character %>% lapply(.,paste0,collapse="") %>% unlist %>% DNAStringSet()
-BrowseSeqs(browse)
-
-##Ridge Plot
-gg.ridge <- ggplot(ent, aes(x = as.numeric(pos), y=Family,height=ma, group=Family, fill=ma)) + 
-  geom_density_ridges_gradient(stat= "identity", scale = 5,size=0.1) +
-  scale_fill_viridis(option="C") +
-  theme_pubclean() +    
-  theme(legend.position = "none") +
-          ylab("Family of pest insects") +
+# Plot entropy of COI Gene
+gg.box <- ent %>%
+  group_by(pos) %>%
+  mutate(median = median(ma)) %>%
+  ggplot(aes(x = pos, y=ma, group=pos, colour=structure)) + 
+  geom_boxplot(outlier.shape = NA, alpha=0.8) +
+  geom_line(aes(x = pos, y=median),size=1, inherit.aes = FALSE) + #, colour="black"
+  #?geom_tufteboxplot(median.type = "point", whisker.type = "line", hoffset = 0) +
+  theme_classic() +    
+  theme(legend.position = "bottom") +
+  ylab("Entropy") +
   xlab("Position within COI folmer region") +
-  scale_x_continuous(limits = c(-10, 658),breaks=seq(0,600,50),expand=c(0,0))  +
- #geom_point(data=ent[ent$pos==1,],aes(x=pos220, y=Family), size = 1,color="white",alpha=0.5) +
- #geom_point(aes(x=-5,y=Family,colour=as.numeric(log(species)))) +
-  facet_grid(Order~., space="free",scales="free_y") 
+  scale_color_manual(values=c("#ca0020", "#0571b0")) +
+  scale_x_continuous(limits = c(0, 712), breaks=seq(0,700,50), expand=c(0,0)) 
 
-```
-
-
-Is there anyway to do an entropy measurement, or consensus alignment or something across the entire family list to remove the problem of having different length sequences
-
-
-# Find diagnostic mini-barcode within COI
-
-Could we do sliding window with a clustered database? use kmer package to cluster? - then select the longest sequence
-
-Or is it worth doing a coarse entropy
-
-```{bash slurmjobscript }
-echo "Create individual R files for each fasta, and Sbatch job files"
-loc=$(pwd)
-TMPDIR=\$TMPDIR
-host=\hostname
-
-mkdir $loc/output/
-  
-  ls pests | sed -e '1p' -e '/.fa.gz/!d' | sort > test_ls_2
-
-
-declare -i files
-let files=$(grep -c ".fa.gz" test_ls_2)
-echo "#qsub file to run all slurm files" > queue_all_jobs
-
-###Make the header for the qsub files
-echo "#!/bin/bash
-#SBATCH --job-name r_slidingwin
-#SBATCH --nodes=1
-#SBATCH --ntasks=4
-#SBATCH --mem=120GB 
-#SBATCH --time=96:00:00
-
-echo '$host'
-echo $TMPDIR
-
-cd $TMPDIR
-mkdir job_dir
-cd job_dir" > script_header
-
-###Set variables & start while loop
-
-declare -i x
-x=1
-
-
-##Start while loop
-
-while [ $x -le $files ] 
-do
-
-
-##Make individual R script files	
-read_file=$(sed -n "${x}p" test_ls_2)
-sample=$(echo $read_file | awk -F . '{print $1}' )
-
-echo "file = '$read_file'" > R_header
-
-cat R_header base_sw.R > sw$sample.R
-
-
-##Create Job submission files
-
-echo "cp $loc/pests/$read_file .
-	cp $loc/sw$sample.R .
-
-#Load modules and run R scripts
-module load R/3.5.1-intel-2019a
-Rscript sw$sample.R
- 
-cp *.rds $loc/output/. " > temp_slurm_file
-
-###assembling components into queue all jobs file
-
-cat script_header temp_slurm_file > QA_swscript_$sample.slurm
-echo "sbatch QA_swscript_$sample.slurm" >> queue_all_jobs
-echo "rm QA_swscript_$sample.slurm" >> queue_all_jobs
-
-let x=x+1
-done
-#Cleanup
-rm script_header
-rm temp_slurm_file
-rm test_ls_2
-rm R_header
-
-echo "Queue files made. Please run queue_all_jobs script"
-
-```
-
-# swscript
-```{r}
-library("spider")
-library("ape")
-library("DECIPHER")
-library("Biostrings")
-library("tidyverse")
-library("insect")
-
-#files <- list.files(path="Sequences/pests/",pattern=".fa.gz",full.names = TRUE)
-#file <- files[3]
-
-name <- basename(file) %>%
-  str_replace(".fa.gz","")
-
-message(name)
-
-seqs <- readFASTA(file)
-
-seqs <- as.matrix(seqs)
-
-# Genus and species names
-aa <- Biostrings::strsplit(dimnames(seqs)[[1]], split = ";")
-Genus <- sapply(aa, function(x) paste(x[7], sep = "_"))
-Spp <- sapply(aa, function(x) paste(x[8], sep = "_")) %>%
-  str_replace(pattern="\\ ", replacement="_")
-
-slidelist <- list()
-# summary statistics
-
-sum <- as.data.frame(as.matrix(dataStat(Spp, Genus)))
-rows <- rownames(sum)
-sum <- rbind(sum, nrow(seqs))
-rownames(sum) <- c(rows, "seqs")
-colnames(sum) <- name
-
-
-slidelist[[1]] <- sum
-
-####################### Sliding window analyses to identify a mini-barcode region #######################
-
-slidelist[[2]] <- slideAnalyses(seqs, Spp, width = 220, interval = 1, distMeasures = TRUE, treeMeasures = TRUE)
-slidelist[[3]] <- slideAnalyses(seqs, Spp, width = 420, interval = 1, distMeasures = TRUE, treeMeasures = TRUE)
-
-## Find conserved primer sites Using windows of 20, 25 and 30bp in length
-
-slidelist[[5]] <- slideAnalyses(seqs, Spp, width = 21, interval = 1, distMeasures = TRUE, treeMeasures = TRUE)
-
-saveRDS(slidelist, file = paste0(name, "_windowlist.rds"))
-```
-
-## Plotting figures
-
-# Figure 1 - Patterns of sequence evolution within COI for priority pest groups
-
-NOTE - Instead of plotting extra dots, could try changing the alpha of the segment between the optimal windows!
-
-```{r Figure 1}
-
-##ADD OPTIMAL DIAGNOSTIC POSITION
-
-path <- "output/" # CHANGE ME to the directory containing all downloaded bold CSV files
-vec <- sort(list.files(path, pattern = ".rds", full.names = TRUE)) # Read fasta filenames
-length(vec)
-
-rank220 <- vector("list",length=length(vec))
-rank420 <- vector("list",length=length(vec))
-primerent <- vector("list",length=length(vec))
-
-l <- 1
-for (l in 1:length(vec)) {
-  dat <- readRDS(vec[l])
-
-  rank220[[l]] <- rankSlidWin(dat[[2]])
-#  rank420[[l]] <- rankSlidWin(dat[[3]])
-#  primerent[[l]] <- dat[[5]][["dist_mean_out"]]
+# Sliding window of entropy
+sw <- function(x, width, interval = 1){
+  win <- seq(1,  length(x) - width, by = interval) #Get all possible windows
+  out <- vector("numeric", length=length(x))
+  for(i in 1:length(win)){
+  out[[i]] <- sum(x[win[i]:(win[i] + width)])
+  }
+  out[out==0] <- NA
+  return(out)
 }
 
-#220bp - replace this with the newer unnest stuff
-sw_220 <- lapply(rank220, function(x) {
-  x[[1]]
-})
+ent_sw <- values %>%
+  group_by(names) %>%
+  mutate(sw220 = sw(value, width=220, interval = 1)/220) %>%
+  mutate(sw420 = sw(value, width=420, interval = 1)/420) %>%
+  mutate(sw20 = sw(value, width=20, interval = 1)/20) %>% #For primers
+  ungroup()%>%
+  pivot_longer(starts_with("sw"),
+               names_to = "windowsize",
+               values_to = "sw") 
 
-names <- vec %>%
-  str_split_fixed("/", n = 2)
-names <- names[, 2] %>%
-  str_split_fixed("_", n = 2)
-names <- names[, 1]
-
-
-names(sw_220) <- names
-
-sw_220 <- t(bind_rows(sw_220))
-sw_220 <- cbind(sw_220, rownames(sw_220))
-
-sw_220 <- as.tibble(sw_220)
-colnames(sw_220) <- c(1:10, "family")
-
-sw_220 <- sw_220 %>%
-  gather(key = rank, value = position, -family)
-
-sw_220$position <- as.numeric(sw_220$position)
-
-sw_220 <- sw_220 %>%
-  mutate(winend = position + 220)  %>%
-  subset(select=c("family","position","winend"))
-colnames(sw_220) <- c("family","pos220","winend220")
-
-ent <- left_join(ent,unique(sw_220), by="family")
-
-##Get counts of pest taxa in families
-## Family sum comes from first plot!
-ent <- inner_join(ent, family_sum, by = "family")
-
-
-#Reorder by taxonomic order
-
-highorder <- tax_summary %>% 
-  subset(select=c("family","order"))
-
-#Rename uncommon orders
-highorder$order <- as.character(highorder$order)
-highorder$order[which(highorder$order=="Orthoptera")] <- "Other"
-highorder$order[which(highorder$order=="Mesostigmata")] <- "Other"
-highorder$order[which(highorder$order=="Blattodea")] <- "Other"
-highorder$order[which(highorder$order=="Thysanoptera")] <- "Other"
-
-#Join to df and order by species
-ent <- left_join(ent, unique(highorder), by = "family")
-ent$order <- factor(ent$order, levels =c('Lepidoptera','Diptera','Coleoptera','Hemiptera',"Hymenoptera","Other"))
-
-#ent$family <- paste0(ent$family, "(", ent$species,")")
-
-#change entropy of first and last position to 1 to make a clean end
-ent$ma[is.na(ent$ma)] <-0
-ent$ma <- as.numeric(ent$ma)
-
-##Ridge Plot
-ggridge <- ggplot(ent, aes(x = as.numeric(pos), y=family,height=ma, group=family, fill=ma)) + 
-  geom_density_ridges_gradient(stat= "identity", scale = 5,size=0.1) +
-  scale_fill_viridis(option="C") +
-  theme_pubclean() +    
-  theme(legend.position = "none") +
-          ylab("Family of pest insects") +
-  xlab("Position within COI folmer region") +
-  scale_x_continuous(limits = c(-10, 658),breaks=seq(0,600,50),expand=c(0,0))  +
- geom_point(data=ent[ent$pos==1,],aes(x=pos220, y=family), size = 1,color="white",alpha=0.5) +
-  geom_point(aes(x=-5,y=family,colour=as.numeric(log(species)))) +
-  facet_grid(order~., space="free",scales="free_y") 
-
-#dataart plot
-full_length <- unique(ent$family[which(ent$pos==658)])
-gg.art <- ggplot(ent[ent$family %in% full_length,], aes(x = as.numeric(pos), y=family,height=ma, group=family, fill=ma)) + 
-  geom_density_ridges_gradient(stat= "identity", scale = 5,size=0.1) +
-  scale_fill_viridis(option="C") +
-  theme_void() +    
-  theme(legend.position = "none")
-  
-#Primer density plot
-primers <- read_csv("primer_candidates.csv")
-primers_final <- primers[which(primers$Final=="TRUE"), ]
-
-primerpos <- seq(0.001,0.004,0.001)
-
-gg.primers <- ggplot(data=ent[ent$pos==1,], aes(x = as.numeric(position))) + 
-  geom_density(aes(x=pos220,fill=1),alpha=0.5) +
-  geom_rug(aes(x=jitter(pos220,factor=5)))+
-  geom_segment(data = primers_final, aes(x = F.Start, xend = F.Stop, y = primerpos, yend = primerpos, colour = Name), size = 3) +
-  geom_text(data = primers_final, aes(x = F.Start, y = primerpos, label = F.Name), hjust = 1) +
-  geom_segment(data = primers_final, aes(x = R.Stop, xend = R.Start, y = primerpos, yend = primerpos, colour = Name), size = 3) +
-  geom_text(data = primers_final, aes(x = R.Stop, y = primerpos, label = R.Name), hjust = 0) +
-  geom_segment(data = primers_final, aes(x = F.Stop, xend = R.Start, y = primerpos, yend = primerpos), colour = "grey", size = 1) +
-  geom_text(data = primers_final, aes(x = (R.Start - (amplicon / 2)), y = primerpos, label = amplicon), vjust = -0.2)+ scale_x_continuous(limits = c(-10, 658),breaks=seq(0,600,50),expand=c(0,0))  +
+gg.density <-  ent_sw %>%
+  dplyr::rename(Order = names) %>%
+  mutate(Order = case_when(
+     Order %in% c("Coleoptera", "Diptera", "Hemiptera", "Hymenoptera", "Lepidoptera") ~ Order,
+    !Order %in% c("Coleoptera", "Diptera", "Hemiptera", "Hymenoptera", "Lepidoptera") ~ "Other"
+    )) %>%
+  ggplot(aes(x = pos, y=1)) +
+    geom_tile(aes(fill=sw))+
+    scale_fill_viridis_c(option="plasma") + 
+  facet_wrap(windowsize~Order, ncol=1, strip.position ="right") +
+  scale_x_continuous(limits = c(0, 712), breaks=seq(0,700,50), expand=c(0,0))  +
   theme_void() +
-  scale_colour_viridis(discrete=TRUE) +
+  theme(legend.position = "bottom",
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.y = element_blank())
+
+
+## Primers
+primers <- read_csv("primer_evaluation/primer_candidates.csv")
+
+Fprimerpos <- seq(1,nrow(primers %>% filter(strand=="F")),1)/1000
+Rprimerpos <- seq(1,nrow(primers %>% filter(strand=="R")),1)/1000
+
+gg.primers <- ggplot(data=values[values$pos==1,], aes(x = as.numeric(pos))) +
+  geom_segment(data = primers %>% filter(strand=="F"),
+               aes(x = start, xend = end,
+                   y = Fprimerpos, yend = Fprimerpos,
+                   colour=strand), size = 1, arrow = arrow(length = unit(0.3,"cm")),
+               show.legend = FALSE) +
+  geom_text(data = primers %>% filter(strand=="F"),
+            aes(x = start, y = Fprimerpos,
+                label = name , colour=strand),
+            hjust = 1, show.legend = FALSE) +
+  geom_segment(data = primers %>% filter(strand=="R"),
+               aes(x = end, xend = start,
+                   y = Rprimerpos, yend = Rprimerpos,
+                   colour=strand), size = 1,
+               arrow = arrow(length = unit(0.3,"cm")),
+               show.legend = FALSE) +
+  geom_text(data = primers %>% filter(strand=="R"),
+            aes(x = end, y = Rprimerpos,
+                label = name, colour=strand),
+            hjust = 0, show.legend = FALSE)  +
+  scale_x_continuous(limits = c(0, 712), breaks=seq(0,700,50), expand=c(0,0)) +
+  theme_classic()  +
   theme(legend.position = "none",
         axis.text = element_blank(),
         axis.ticks = element_blank(),
         axis.title = element_blank())
 
-## Pest density plot
-gg.family <- ggplot(data=ent[ent$pos==1,], aes(x=family,group=order,fill=order)) + 
-  geom_bar(aes(x=family,y=species),stat="identity",position="identity",alpha=0.5)  +
-  scale_fill_viridis(discrete=TRUE) + 
-  theme_pubr(margin=FALSE) +
-   theme(legend.position = "none",
-         axis.text = element_blank(),
-        axis.ticks = element_blank(),
-        axis.title = element_blank()) + 
-  scale_x_discrete(expand=c(0,0))+
-  scale_y_discrete(expand=c(0,0))+
+Fig2 <- gg.box / gg.density / gg.primers 
+
+pdf(file="fig/Fig2.pdf", width = 11, height = 8 , paper="a4r")
+  plot(Fig2)
+try(dev.off(), silent=TRUE)
+ 
+```
+
+# Predicted mismatch
+
+```{r Primerminer, message=FALSE}
+library(PrimerMiner)
+## Target sequences to test against
+seqs <- insect::readFASTA("reference/merged_final_aligned.fa.gz")
+names(seqs) <- names(seqs) %>% str_replace_all(" ", "_")
+writeFASTA(seqs, "reference/merged_final_aligned_target.fa.gz")
+
+target <- "reference/merged_final_aligned_target.fa.gz"
+
+# Load primers
+primers <- read_csv("primer_evaluation/primer_candidates.csv") %>%
+  mutate(seq = str_replace_all(seq, "I","N")) %>% 
+  select(-score, -issues)
+
+dir.create("primer_evaluation/PrimerMiner")
+
+for (i in 1:nrow(primers)) {
+  if(primers$strand[i]=="F"){
+  evaluate_primer(target,
+   as.character(primers$seq[i]), primers$start[i], primers$end[i],
+   forward = TRUE, gap_NA = TRUE, N_NA=TRUE,
+   mm_position = "Position_v1", mm_type = "Type_v1", adjacent = 2,
+   save = paste0("primer_evaluation/PrimerMiner/", primers$name[i],".csv")
+  )
+  } else if(primers$strand[i]=="R"){
+  evaluate_primer(target,
+   as.character(primers$seq[i]), primers$start[i], primers$end[i],
+   forward = FALSE, gap_NA = TRUE, N_NA=TRUE,
+   mm_position = "Position_v1", mm_type = "Type_v1", adjacent = 2,
+   save = paste0("primer_evaluation/PrimerMiner/", primers$name[i],".csv")
+  )
+ }
+}
+
+```
+
+## Figure 3
+
+```{r figure 4}
+# Load primers
+primers <- read_csv("primer_evaluation/primer_candidates.csv") %>%
+  mutate(seq = str_replace_all(seq, "I","N")) %>% 
+  select(-score, -issues)
+
+#Read in all files
+files <- sort(list.files(list.dirs("primer_evaluation/PrimerMiner/"), pattern = ".csv", full.names = TRUE))
+
+dat <- files %>% 
+  purrr::set_names() %>%
+  map_dfr(vroom::vroom, col_select= list("Template", "sequ", "sum"),
+          .id = "source", progress=FALSE) %>%
+  mutate(Template = str_remove(Template, ";$"))%>%
+  separate(col=Template, into=c("Acc","Kingdom","Phylum","Class","Order","Family","Genus","Species"), sep=";") %>%
+  dplyr::rename(Sequence = sequ) %>% 
+  dplyr::mutate(primer = str_remove(basename(source), ".csv")) 
+
+# set summary level
+#sumlevel <- "Family"
+
+summaries <- dat %>%
+  tidyr::separate(Acc, into=c("Acc", "tax_id"), sep="\\|") %>%
+  group_by(primer, Genus, tax_id) %>% #Group by higher to minimize plotting
+  summarise(sum = mean(sum)) %>%
+  ungroup()%>%
+  mutate(dup = paste0(primer, Genus)) %>% 
+  filter(!duplicated(dup)) %>% #remove any duplicates
+  dplyr::select(-dup) %>%
+  mutate(dir = case_when(
+    primer %in% unique(primers %>% filter(strand=="F") %>% pull(name)) ~ "Forward",
+    primer %in% unique(primers %>% filter(strand=="R") %>% pull(name)) ~ "Reverse"
+    ))  
+
+# Arrange on tree
+library(castor)
+tree <- rncl::read_newick_phylo("reference/ultrametric_insecta_tree.nwk")
+
+# Prune tree to genus
+tips_to_keep <- dat %>%
+  dplyr::select(Kingdom, Phylum, Class, Order, Family, Genus, Species) %>%
+  dplyr::filter(!duplicated(Species)) %>%
+  dplyr::filter(Class=="Insecta") %>%
+  filter(Genus %in% (summaries %>% pull(Genus))) %>%
+  group_by(Genus) %>%
+  dplyr::slice(1) %>%
+  ungroup() %>%
+  mutate(name_check = case_when(
+    str_extract(Species, "^.+?(?=_)") == Genus ~ TRUE,
+    !str_extract(Species, "^.+?(?=_)") == Genus ~ FALSE
+  )) %>%
+  filter(name_check) %>%
+  dplyr::select(-name_check)
+
+tree  <- castor::get_subtree_with_tips(tree,
+                                          omit_tips=setdiff(tree$tip.label, tips_to_keep$Species),
+                                          collapse_monofurcations=TRUE,
+                                          force_keep_root=TRUE)$subtree
+
+#Prune names to genus
+tree$tip.label <- tree$tip.label %>% str_extract("^.+?(?=_)")
+
+Ntips 	<- length(tree$tip.label)
+Nnodes 	<- tree$Nnode
+cat(sprintf("Tree has %d nodes, %d tips and %d edges\n",Nnodes,Ntips,nrow(tree$edge)));
+
+# create internal node labels
+tree$node.label <- NA
+if(is.na(tree$node.label)){
+	cat(sprintf("Adding node labels to full tree..\n"))
+	tree$node.label = paste("node.", 1:Nnodes, sep = "") # don't use underscores, because some tree readers (e.g. rncl) interpret them as spaces
+}
+
+# replace zero-length edges
+if(any(tree$edge.length==0)){
+  epsilon = 0.1*min(tree$edge.length[tree$edge.length>0])
+	cat(sprintf("Note: Some edges have length zero, which may break some of the HSP routines. Replacing zero-lengths with a tiny positive length (%g)..\n",epsilon))
+	tree$edge.length[tree$edge.length==0] = epsilon
+}
+
+
+## Get values for higher nodes with castor
+uprimers <- unique(summaries$primer)
+p_weights <- vector("list", length=length(uprimers))
+for (i in 1:length(uprimers)){
+  print(paste0("Processing Primer ",i, " of ", length(uprimers), ": ", uprimers[i]))
+  tip_states <- summaries %>%
+    dplyr::filter(primer==uprimers[i], Genus %in% tips_to_keep$Genus) %>%
+    group_by(Genus) %>%
+    summarise(values = mean(sum, na.rm=TRUE))%>%
+    ungroup() %>%
+    column_to_rownames("Genus")
+    
+  row2tip <- match(rownames(tip_states), tree$tip.label)
+  tip_states <- tip_states[!is.na(row2tip),,drop = FALSE]
+  hsp_states <- castor::hsp_independent_contrasts(tree = tree,
+                                              tip_states = tip_states$values,
+                                              weighted = TRUE,
+                                              check_input = TRUE)$states
+  
+   p_weights[[i]] <- tip_states %>%
+    rownames_to_column("Genus") %>%
+    mutate(hsp = hsp_states[1:Ntips])
+}
+names(p_weights) <- uprimers
+
+imputed <- summaries %>%
+    left_join(bind_rows(p_weights,.id = "primer"), 
+               by = c("primer", "Genus")) %>%
+  filter(!is.na(hsp))
+
+primer_orders <- imputed %>%
+  group_by(primer) %>%
+  dplyr::summarise(hsp = mean(hsp, na.rm=TRUE), sum = mean(sum, na.rm=TRUE)) %>%
+  arrange(hsp)
+
+# LAbel branches
+tax_groups <- tips_to_keep %>%
+dplyr::rename(label = Genus) %>%
+select(label, Order) %>%
+filter(label %in% tree$tip.label) %>%
+group_by(Order)
+
+group_name <- group_keys(tax_groups)  %>%
+mutate(group_name = Order %>% str_remove_all("\\[|\\]"))
+
+cls <- tax_groups %>%
+group_split() %>%
+purrr::map(pull, label) %>%
+set_names(group_name$group_name)
+
+tree2 <- groupOTU(tree, cls)
+
+# Plot tree
+p1 <- ggtree(tree2, ladderize=TRUE, aes(colour=values)) +
+  geom_text2(aes(subset=!isTip, label=group %>% na_if(0)), hjust=0, check_overlap=TRUE)
+
+weights_p1 <- p1$data %>%
+  left_join(imputed %>%
+              group_by(Genus) %>%
+              summarise(values = mean(sum, na.rm=TRUE))%>%
+              dplyr::rename(label = Genus)
+    )  
+
+
+tip_states <- weights_p1 %>%
+  dplyr::filter(isTip) %>%
+  pull(values)
+names(tip_states) <- weights_p1 %>%
+  dplyr::filter(isTip) %>%
+  pull(label)
+
+weights_p1$values[!weights_p1$isTip] <- castor::asr_independent_contrasts(tree=tree,
+                                                        tip_states=tip_states)$ancestral_states
+
+p2 <- p1 %<+% weights_p1 + geom_tippoint(aes(colour=values)) +
+  scale_color_gradient(low="darkslateblue", high="firebrick") +
+  theme(legend.position = "none") + 
+  scale_y_continuous(expand=c(0,0))+ 
+  scale_x_discrete(expand=c(0,0)) 
+
+## make a clade label list
+#tax_groups <- tips_to_keep %>%
+#  dplyr::rename(label = Genus) %>%
+#  select(label, Order) %>%
+#  filter(label %in% tree$tip.label) %>%
+#  group_by(Order) 
+#
+#group_name <- group_keys(tax_groups)  %>%
+#  mutate(group_name = Order %>% str_remove_all("\\[|\\]"))
+#
+#cls <- tax_groups %>% 
+#  group_split() %>% 
+#  purrr::map(pull, label) %>%
+#  set_names(group_name$group_name) %>%
+#  purrr::map(get_mrca_of_set, tree=tree)
+#
+#p3 <- p2
+#for(i in 1:length(cls)){
+#p3 <- p3 + geom_cladelabel(node=cls[[i]], label=names(cls[i]), align=T, angle=270, hjust='center', #offset.text=.5, barsize=1.5)
+#}
+# Plot heatmap
+gg.mismatch <- imputed %>%
+  left_join(p2$data %>% dplyr::select(label, y) %>% dplyr::rename(Genus = label)) %>%
+  mutate( primer = factor(primer, levels=primer_orders$primer)) %>%     
+  ggplot(aes(x = primer, y = y, fill = hsp)) +
+    geom_raster() +
+    #scale_fill_distiller(palette = "Spectral", limits = c(0, 200)) +
+    scale_fill_gradient(low = "darkslateblue", high = "firebrick", na.value = "grey", limits = c(0, 200), oob = scales::squish) +
+    facet_grid(~dir, scales="free", space="free", drop=TRUE) +
+    #theme_classic() + 
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      axis.text.y = element_blank(),
+      axis.ticks.y = element_blank(),
+      axis.title.y = element_blank(),
+      strip.text.y = element_text(angle = 0),
+      #strip.background = element_rect(fill="grey10"),
+      legend.position = "none"
+    ) + 
+  scale_y_continuous(expand=c(0,0))+ 
+  scale_x_discrete(expand=c(0,0))
+
+# Density plot of mismatch
+gg.density <- imputed %>%
+  left_join(p2$data %>% dplyr::select(label, y) %>% dplyr::rename(Genus = label)) %>%
+  group_by(Genus, y) %>%
+  summarise(values = mean(sum, na.rm=TRUE)) %>%
+  ggplot(aes(x = y, y=values, fill=values, colour=values)) +
+  geom_point(size=0.01, alpha=0.5)+
+  #geom_smooth(span = 0.1)+
+  scale_colour_gradient(low="darkslateblue", high="firebrick") + 
+  scale_x_continuous(expand=c(0,0)) +
+  scale_y_continuous(expand=c(0,0)) +
+  theme_void() +
+  theme(legend.position = "none")+
   coord_flip()
 
+#Fig3 <- p2 + gg.mismatch + plot_layout(widths = c(1,2))
 
-Fig1 <-  gg.primers + ggridge +plot_layout(nrow = 2, heights = c(1,5))
-```
+Fig3 <- p2 + gg.mismatch + gg.density + plot_layout(widths = c(1,3,0.25))
 
-Problem groups that need to be fixed for final figure - 
-Phlaeothripidae
-Liviidae
-Monophlebidae
-Pseudococcidae
-Diaspididae
+pdf(file="fig/Fig3.pdf", width = 8, height = 11 , paper="a4")
+  plot(Fig3)
+try(dev.off(), silent=TRUE)
+ 
 
-# Figure 2 - Evaluation of individual primer mismatch using PrimerMiner
-PROBLEM - lost the folmer F and R binding regions when cleaning, so am restricting to primers within the binding region. It would be nice to have them all so i will need to do download and cleaning again. Need to write automated script for this, or see code from below study
-
-Code modified from: Bylemans J, Gleeson DM, Hardy CM, Furlan E. Toward an ecoregion scale evaluation of eDNA metabarcoding primers: A case study for the freshwater fish biodiversity of the Murray-Darling Basin (Australia). Ecol Evol. 2018;8697–712. 
-
-```{r Primerminer , message=FALSE}
-library(PrimerMiner)
-
-primers <- read_csv("primer_candidates.csv")
-fasta_path <- "N added/"
-Alignments <- sort(list.files(fasta_path, pattern = ".fa", full.names = TRUE)) # Read fasta filenames
-
-names <- Alignments %>%
-  str_split_fixed("/", n = 2)
-names <- names[, 2] %>%
-  str_split_fixed(".filt", n = 2)
-names <- names[, 1]
-
-Thresholds <- seq(10, 300, 10)
-
-PM.Output <- data.frame(
-  "Name" = character(), "Target" = character(), "F.Input" = character(), "R.Input" = character(),
-  "InputThreshold" = integer(), "OK" = integer(), "FAIL" = integer(), "MISSING" = integer(), stringsAsFactors = F
-)
-
-# Filter to only those within alignment size & HiSeq sized
-dat.passed <- primers[which(primers$F.Start > 0 & primers$R.Stop < 661), ]
-dat.passed <- dat.passed[which(dat.passed$amplicon < 240), ]
-
-dir.create("PrimerMiner/PrimerEvaluation/")
-
-for (i in 1:nrow(dat.passed)) {
-  if (!is.na(dat.passed$F.Start[i])) {
-    dir.create(paste0("PrimerMiner/PrimerEvaluation/", dat.passed$F.Name[i]))
-    dir.create(paste0("PrimerMiner/PrimerEvaluation/", dat.passed$R.Name[i]))
-    for (j in 1:length(Alignments)) {
-      evaluate_primer(Alignments[j],
-        as.character(dat.passed$F.seq[i]), dat.passed$F.Start[i], dat.passed$F.Stop[i],
-        forward = T, gap_NA = T,
-        mm_position = "Position_v1", mm_type = "Type_v1", adjacent = 2,
-        save = paste0("PrimerMiner/PrimerEvaluation/", dat.passed$F.Name[i], "/", names[j], ".csv")
-      )
-      evaluate_primer(Alignments[j],
-        as.character(dat.passed$R.seq[i]), dat.passed$R.Start[i], dat.passed$R.Stop[i],
-        forward = F, gap_NA = T,
-        mm_position = "Position_v1", mm_type = "Type_v1", adjacent = 2,
-        save = paste0("PrimerMiner/PrimerEvaluation/", dat.passed$R.Name[i], "/", names[j], ".csv")
-      )
-    }
-  }
-  # Below uses primer_thresholds to pass or fail a threshold depending on a Penalty score threshpld of 10-300
-  if (!is.na(dat.passed$F.Start[i])) {
-    for (n in 1:length(Alignments)) {
-      for (m in 1:length(Thresholds)) {
-        temp <- read.csv(paste0("PrimerMiner/PrimerEvaluation/", dat.passed$R.Name[i], "/", names[j], ".csv"), stringsAsFactors = F)
-        PM.Output[(((i - 1) * (length(Alignments))) + n - 1) * length(Thresholds) + m, ] <- c(
-          c(
-            as.character(dat.passed$Name[i]),
-            as.character(names[n]),
-            paste0(dat.passed$F.Name[i], "/", names[n], ".csv"),
-            paste0(dat.passed$R.Name[i], "/", names[n], ".csv"),
-            as.integer(Thresholds[m])
-          ),
-          unname(as.list(primer_threshold(
-            paste0("PrimerMiner/PrimerEvaluation/", dat.passed$F.Name[i], "/", names[n], ".csv"),
-            paste0("PrimerMiner/PrimerEvaluation/", dat.passed$R.Name[i], "/", names[n], ".csv"),
-            as.integer(Thresholds[m])
-          )))
-        )
-      }
-    }
-  }
-}
-
-
-# PM.Output <- PM.Output[which(!PM.Output$Name=="ArF5-ArR5"),]
-
-PM.Output$InputThreshold <- as.integer(PM.Output$InputThreshold)
-
-
-gg.PrimerMiner <- ggplot(PM.Output, aes(fill = InputThreshold)) +
-  geom_bar(aes(x = factor(InputThreshold), y = ((OK / (OK + FAIL)) * 100)),
-    stat = "identity", width = 1
-  ) + scale_fill_viridis() +
-  labs(x = NULL, y = "% OTU's amplified") +
-  facet_grid(Name ~ Target) +
-  theme_pubr() +
-  theme(
-    axis.line = element_line(size = 0.25, colour = "black"),
-    axis.ticks.x = element_blank(),
-    axis.title = element_text(size = 7, colour = "black"),
-    axis.text = element_text(size = 7, colour = "black"),
-    axis.text.x = element_blank(),
-    strip.text = element_text(size = 8, colour = "black", face = "bold", angle = 90),
-    panel.grid.minor = element_blank(),
-    panel.grid.major.x = element_blank(),
-    panel.spacing.x = unit(0, "cm"),
-    legend.title = element_blank(),
-    legend.text = element_text(size = 7, colour = "black"),
-    legend.margin = margin(0, 0.1, 0, 0.1, "cm")
-  )
-
-
-
-## Per familie summary
-
-paths <- list.dirs("PrimerMiner/PrimerEvaluation/")
-paths <- paths[!paths == "PrimerMiner/PrimerEvaluation/"]
-
-dat <- list()
-i <- 1
-l <- 1
-for (i in 1:length(paths)) {
-  proc <- sort(list.files(paths[i], pattern = ".csv", full.names = TRUE))
-
-  names <- proc %>%
-    str_split_fixed("/", n = 5)
-  target <- names[1, 4]
-  names <- names[, 5] %>%
-    str_split_fixed(".csv", n = 2)
-  names <- names[, 1]
-  templist <- list()
-  for (l in 1:length(proc)) {
-    ## Loop to read them all in
-    temp <- read.csv(proc[l], stringsAsFactors = F)
-    temp <- c(target, names[l], mean(temp$sum))
-    templist[[l]] <- temp
-  }
-  dat[[i]] <- as.data.frame(do.call("rbind", templist))
-}
-summaries <- as.data.frame(do.call("rbind", dat))
-
-colnames(summaries) <- c("Primer", "Family", "Mean")
-summaries$Mean <- as.numeric(as.character(summaries$Mean))
-
-# Remove Phlaeothripidae- alignment is wrong
-summaries <- summaries[which(!summaries$Family == "Phlaeothripidae"), ]
-
-# Add Mean for primers
-summaries <- summaries %>%
-  drop_na()
-all_means <- aggregate(summaries[, 3], list(summaries$Primer), mean)
-colnames(all_means) <- c("Primer", "Mean")
-all_means$Family <- "Mean"
-summaries <- rbind(summaries, all_means)
-
-# aggregate(. ~ Primer, summaries[,3], mean)
-
-# Add forward and Reverse Primers
-Forward <- c("AgPestF1", "AgPestF2", "ArF5", "BF1", "BF2", "fwhF2", "mtCOIintF", "Saurons879", "SternoCOIF1")
-Reverse <- c("AgPestR1a", "AgPestR1b", "AgPestR2", "BR1", "fwhR2n", "SternoCOIR1")
-summaries$dir <- NA
-summaries$dir[which(summaries$Primer %in% Forward)] <- "F"
-summaries$dir[which(summaries$Primer %in% Reverse)] <- "R"
-
-# Order by F-Rev
-
-summaries <- summaries %>%
-  mutate(dir_Primer = paste0(dir, "-", Primer))
-
-gg.sum <- ggplot(summaries, aes(fill = Mean / 3)) +
-  geom_bar(aes(x = Family, y = Mean / 3),
-    stat = "identity", position = "identity", width = 1, colour = "black"
-  ) +
-  facet_wrap(~dir_Primer, ncol = 1, strip.position = "right") +
-  theme_pubr(base_size = 12, base_family = "serif") +
-  scale_fill_gradient(low = "green", high = "red", limits = c(0, 200), oob = scales::squish) +
-  theme(
-    axis.text.x = element_text(angle = 45, hjust = 1),
-    strip.text.y = element_text(angle = 0)
-  ) +
-  ylab("Mismatch score") +
-  scale_y_continuous(breaks = c(100, 200)) +
-  coord_cartesian(ylim = c(0, 200)) +
-  geom_text(data = summaries[which(summaries$Family == "Mean"), ], aes(x = Family, y = Mean / 3, label = sprintf("%.4g", round(Mean / 3, digits = 0))), nudge_y = 50)
-
-
-## Need to rearrange by Order! - With sum at the end
-
-# Instead of doing mean/f3, can we do a unique() to remove duplicate sequences, or group by the species name and mean first
+  
+#- Add a summary metric for mean mismatch for each primer
+#- Add a summary metric for evennes of mismatch for each primer
+#- Add a summary metric for amount of missing data imputed. Is there a way to highlight what data was imputed or not?
+#- Add a metric for amount of degeneracy in each primer
 ```
 
 
-# Evaluate resolution of barcode regions - Summary stats using SPIDER
+# Identification sucess
 
 In order to evaluate the taxonomic resolution of different barcode regions, alignments were trimmed to primer regions using the in silico PCR function from the insect package and  the identificaiton sucess functions from the SPIDER r package were used
 
+Metrics to evaluate primers on:
+ *  OTU clustering of each primer at different ranks, see drop off
+ *  OTU clustering, subset to pests only (ie fraction of pests in their own cluster)
+ *  Datasets subset to pest genera (or families), evaluated with spider nearNeighbour, BestCloseMatch, ThreshID, Monophyly
+ * Leave one out BLAST/RDP?
+ * P(LCR) for each primer?
+ 
+ 
+## Virtual PCR
 
-Modified from SPIDER package tutorial http://spider.r-forge.r-project.org/tutorial/tutorial.pdf and Elodie Modave, Anna J MacDonald, Stephen D Sarre; A single mini-barcode test to screen for Australian mammalian predators from environmental samples, GigaScience, Volume 6, Issue 8, 1 August 2017, gix052, https://doi.org/10.1093/gigascience/gix052
+```{r Virtual PCR}
+# Load seqs
+seqs <- readDNAStringSet("reference/merged_final_aligned.fa.gz")
+seqs <- seqs[lengths(seqs)==712]
 
+# Load primers
+primers <- read_csv("primer_evaluation/primer_candidates.csv") %>%
+  mutate(seq = str_replace_all(seq, "I","N")) %>% 
+  select(-score, -issues)
 
-Pairwise genetic distance was calculated for each pair of sequences using the “raw” model. We conducted bioinformatic analyses using the nearNeighbour, BestCloseMatch, and ThreshID functions to identify the taxa most likely to be misidentified or ambiguously identified using our primers
+# Get all possible primer combinations
+combos <- expand_grid(primers %>% filter(strand=="F") %>% pull(seq),
+                      primers %>% filter(strand=="R") %>% pull(seq)
+                      ) %>%
+  mutate_if(is.factor, as.character)%>%
+  unique() %>%
+  magrittr::set_colnames(c("Fseq", "Rseq")) %>%
+  left_join(primers %>% filter(strand=="F") %>% rename_all(. %>% paste0("F",.)), by="Fseq") %>%
+  left_join(primers %>% filter(strand=="R") %>% rename_all(. %>% paste0("R",.)), by="Rseq") %>%
+  mutate(amplicon = Rstart - Fend) %>%
+  filter( amplicon > 100)
 
-The nearNeighbour function determines, for each sequence in the reference database, whether the most closely related sequence originates from a conspecific, with 2 outcomes possible: “true” or “false.” This has problems with singletons however, as the nearest neighbour will always be another species,
-
-BestCloseMatch and ThreshID functions use a genetic distance threshold to account for intra-specific variation. We estimated the most appropriate genetic thresholds to use for the “UNIQUE” and “FULL” databases to be 3.5% and 1%, respectively, based on the thresholds with the lowest cumulative error. The BestCloseMatch analysis identified the most closely related sequence, within the specified genetic distance threshold, and its species of origin for each query sequence. The ThreshID analysis extended this to consider species of origin for all sequences within the genetic distance threshold. These analyses had 4 possible outcomes: “correct,” “incorrect,” “ambiguous,” and “no identification” [47]. The “FULL” database was also analysed, with a 3.5% genetic threshold to allow for comparison with the results of the “UNIQUE” database
-
-
-# Need to analyse full region, then each subsetted one. Think about how to best display this? 
-
-
-
-```{r identification sucess}
-
-primers <- read_csv("primer_candidates.csv")
-
-# Filter to only those within alignment size & HiSeq sized
-dat.passed <- primers[which(primers$F.Start > 0 & primers$R.Stop < 661), ]
-dat.passed <- dat.passed[which(dat.passed$amplicon < 250), ]
-
-#dat.passed <- primers[which(primers$Final=="TRUE"), ]
-
-fasta_path <- "Final" # CHANGE ME to the directory containing all downloaded bold CSV files
-fasta_vec <- sort(list.files(fasta_path, pattern = ".fa", full.names = TRUE)) # Read fasta filenames
-
-p <- 1
-i <- 1
-dat <- list()
-prime <- list()
-dir.create("amplicons")
-for (i in 1:length(fasta_vec)) {
-  file <- fasta_vec[i]
-  name <- file %>%
-    str_split_fixed(".filt", n = 2)
-  name <- name[, 1] %>%
-    str_split_fixed("/", n = 2)
-  name <- name[, 2]
-
-  message(name)
-
-  seqs <- read.FASTA(file)
+dir.create("primer_evaluation/amplicons")
 
 
-  for (p in 1:nrow(dat.passed)) {
-    
-    amplicon <- virtualPCR(seqs, up = dat.passed$F.seq[p], dat.passed$R.seq[p], rcdown = TRUE, trimprimers = TRUE)
-    if (length(amplicon) > 1) {
-    
-        #Filter to median - Some amplicons have primer slippage?
-        seqLength <- sapply(amplicon, length)
-        amplicon <- amplicon[which(seqLength == median(seqLength))]
-    
-    
-        amplicon <- as.matrix(amplicon)
-        
-        # Genus and species names
-        aa <- Biostrings::strsplit(dimnames(amplicon)[[1]], split = ";")
-        Genus <- sapply(aa, function(x) paste(x[7], sep = "_"))
-        Spp <- sapply(aa, function(x) paste(x[8], sep = "_"))
-    
-        Dist <- dist.dna(amplicon, pairwise.deletion = TRUE)
-        closematch <- as.data.frame(cbind(bestCloseMatch(Dist, Spp), do.call("rbind",bestCloseMatch(Dist, Spp, names = TRUE))))
-        closematch$query <- rownames(closematch)
-    
-        if (length(unique(Spp)) > 2) {
-          Tr <- nj(Dist)
-          maxInt <- max(Tr$edge.length[Tr$edge[, 2] > length(Tr$tip.label)])
-          nodeRoot <- Tr$edge[which(Tr$edge.length == maxInt), 2]
-          TrRoot <- root(Tr, node = nodeRoot, resolve.root = TRUE)
-          TrRoot$tip.label <- Spp
-          mono <- monophyly(TrRoot, Spp, singletonsMono = TRUE)
-    
-          prime[[p]] <- as.data.frame(cbind(
-            dat.passed$Name[p],
-            Spp, nearNeighbour(Dist, Spp), nearNeighbour(Dist, Spp, names = TRUE),
-            closematch, mono[match(Spp, unique(Spp))]
-          ))
-        } else if (length(unique(Spp)) <= 1) {
-          prime[[p]] <- as.data.frame(cbind(
-            dat.passed$Name[p],
-            Spp, nearNeighbour(Dist, Spp), nearNeighbour(Dist, Spp, names = TRUE),
-            closematch))
-        } 
-      } else next()
+# Setup multithreading
+library(foreach)
+library(doParallel)
+cores=12
+cl <- parallel::makeCluster(cores)
+registerDoParallel(cl)
+
+li <- foreach(p=1:nrow(combos)) %dopar% {
+  #get primer names
+  primernames <- paste0(combos$Fname[p], "_",  combos$Rname[p])
+  
+  # cut down alignments
+  amplicon <- Biostrings::subseq(seqs, start=combos$Fend[p]+1, end = combos$Rstart[p]) #may need to add 1 to start
+  
+  if (any(!lengths(amplicon)== combos$amplicon[p])){
+    warning(paste0("Amplicons of ",primernames, " are not the same length"))
   }
-  out <- bind_rows(prime)
-  write.csv(out,paste0("amplicons/",name,".csv"))
   
-  dat[[i]] <- out
-}
-# Some sequences are lost with the in silico PCR, will need to put another column for unsucessfully amplified
-
-#Read back in data:
-
-vec <- sort(list.files("amplicons", pattern = ".csv", full.names = TRUE)) # Read fasta filenames
-dat <- list()
-for (i in 1:length(vec)){
-  dat[[i]] <- read.csv(vec[i])
-}
+  maxgaps <- 9 # dont allow any more than 9 gaps
+  rem <- names(amplicon)[Biostrings::letterFrequency(amplicon, "-") > maxgaps]
+  amplicon <- amplicon[!names(amplicon) %in% rem]
+  message(paste0(length(rem), " Sequences with more than ", maxgaps, " gaps removed from ", primernames))
   
-id_summary <- bind_rows(dat)
-colnames(id_summary)[2] <- "primer"
+  #write out sequences
+  Biostrings::writeXStringSet(amplicon, file=paste0("primer_evaluation/amplicons/", primernames,".fa.gz"), compress=TRUE)
+}
+#close cluster
+parallel::stopCluster(cl)
 
-tax_summary <- read.csv("tax_summary_curated.csv")
-pest_spp <- tax_summary$species %>%
-  str_replace(pattern = "[ ]", replacement = "_")
+```
+ 
+## Pairwise ID Success
 
-#summarise for all taxa
-all_sum <- id_summary %>%
-  dplyr::group_by(primer) %>%
-  dplyr::summarise(amplified=n(), nn_true=table(nearNeighbour.Dist..Spp.[TRUE])[[2]], nn_false=table(nearNeighbour.Dist..Spp.[TRUE])[[1]], cm_ambiguous=table(V1)[[1]], cm_correct=table(V1)[[2]], cm_incorrect=table(V1)[[3]], cm_noid=table(V1)[[4]], mono_true=table(mono.match.Spp..unique.Spp...)[[2]], mono_false=table(mono.match.Spp..unique.Spp...)[[1]]) %>% gather(key="measure",value="value",-primer)
+Submit array
 
+njobs=$(cat sequence_index.txt | wc -l)
+sbatch --array=1-808 submit_clustering.slurm
 
-#summarise for pest taxa
-pests <- id_summary[which(id_summary$Spp %in% pest_spp), ]
+### Index jobs
+```{bash generate job index}
+#!/bin/bash
+/usr/bin/ls -d $PWD/* | sed -e '1p' -e '/.fa.gz/!d' | sort -u > sequence_index.txt
+```
 
-pests_sum <- pests %>%
-  dplyr::group_by(primer) %>%
-  dplyr::summarise(amplified=n(), nn_true=table(nearNeighbour.Dist..Spp.[TRUE])[[2]], nn_false=table(nearNeighbour.Dist..Spp.[TRUE])[[1]], cm_ambiguous=table(V1)[[1]], cm_correct=table(V1)[[2]], cm_incorrect=table(V1)[[3]], cm_noid=table(V1)[[4]], mono_true=table(mono.match.Spp..unique.Spp...)[[2]], mono_false=table(mono.match.Spp..unique.Spp...)[[1]]) %>% gather(key="measure",value="value",-primer)
+sbatch --array=1-807 usearch_distmat.slurm
 
-#Join datasets
-pests_sum$dataset <- "pests"
-all_sum$dataset <- "all"
-all_sum <- rbind(all_sum,pests_sum)
+### Creat USEARCH distance matrix
 
-p1 <- ggplot(all_sum[which(all_sum$measure == "cm_ambiguous" | all_sum$measure == "cm_correct" | all_sum$measure == "cm_incorrect" |  all_sum$measure == "cm_noid" ),])+
-  geom_bar(aes(x=primer,y=value,fill=measure),stat="identity", position="stack") +
-  facet_wrap(~dataset,scales="free_y")+ 
-  theme(axis.text.x = element_text(angle=90,hjust=1,vjust=0.5))
-
-#+ 
-  theme(axis.text.x = element_blank(),
-        axis.ticks.x = element_blank(),
-        axis.title.x = element_blank())
-
-p2 <- ggplot(all_sum[which(all_sum$measure == "mono_true" | all_sum$measure == "mono_false"),])+
-  geom_bar(aes(x=primer,y=value,fill=measure),stat="identity", position="stack") +
-  facet_wrap(~dataset,scales="free_y") + 
-  theme(axis.text.x = element_text(angle=90,hjust=1,vjust=0.5))
-#+ 
-  theme(axis.text.x = element_blank(),
-        axis.ticks.x = element_blank(),
-        axis.title.x = element_blank())
-
-p3 <- ggplot(all_sum[which(all_sum$measure == "nn_true" | all_sum$measure == "nn_false"),])+
-  geom_bar(aes(x=primer,y=value,fill=measure),stat="identity", position="stack") +
-  facet_wrap(~dataset,scales="free_y") + 
-  theme(axis.text.x = element_text(angle=90,hjust=1,vjust=0.5))
-
-Fig3a <- p1 / p2 / p3 
+```{bash usearch}
+#!/bin/bash
+#SBATCH --job-name=usearch       
+#SBATCH --ntasks=1 
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=20GB
+#SBATCH --time=240:00:00
+#SBATCH --mail-user=alexander.piper@agriculture.vic.gov.au
+#SBATCH --mail-type=ALL
+#SBATCH --account=pathogens
+#SBATCH --export=none
 
 
-#failed 
+#Check if job is launched as array
+if [ -z "$SLURM_ARRAY_TASK_COUNT" ]; then 
+  echo SLURM_ARRAY_TASK_COUNT unset; 
+  echo You must launch this job as an array
+  echo see https://slurm.schedmd.com/job_array.html
+  echo for info on how to run arrays
+  exit 1
+fi
 
-pest_fail <- pests[which(pests$primer =="fwhF2-fwhR2n" & pests$mono.match.Spp..unique.Spp... == "FALSE" | pests$nearNeighbour.Dist..Spp. == "FALSE" | pests$primer =="fwhF2-fwhR2n" & pests$V1 == "incorrect"),]
-length(unique(pest_fail$Spp))
+Index=sequence_index.txt
 
-#All taxa which failed 
-all_fail <- id_summary[which(id_summary$primer =="fwhF2-fwhR2n" & id_summary$mono.match.Spp..unique.Spp... == "FALSE" | id_summary$nearNeighbour.Dist..Spp. == "FALSE" | id_summary$primer =="fwhF2-fwhR2n" & id_summary$V1 == "incorrect"),]
-length(unique(all_fail$Spp))
+# Make sure that sequence index file is there before we do anything
+if [[ ! -f "${Index}" ]]; then
+  echo "Error sequence index file ${Index} does not exist"
+  exit 1
+fi
 
-# Failed pest taxa were manually inspected, many of these were incorrectly annotated taxonomy, or synonyms
-#The groups that are unlikely to work with any of these primers include:
+#Gather info on our samples
+FullSampleName=$(sed -n ${SLURM_ARRAY_TASK_ID}p ${Index})
+SequencePath=$(dirname ${FullSampleName})
+Sample=$(basename ${FullSampleName} .fa.gz)
+
+echo ${FullSampleName}
+echo ${Sample}
+
+# Double check that array index is valid
+if [[ ! -f "${FullSampleName}" ]]; then
+  echo "Error array index doesnt match up with index file"
+  echo "Array index is  ${SLURM_ARRAY_TASK_ID}"
+  exit 1
+fi
+
+# Goto tmp to do our working out
+echo $TMPDIR
+cd $TMPDIR
+tmp_dir=$(mktemp -d -t ci-XXXXXXXXXX)
+cd $tmp_dir
+
+#Copy data files, database and decompress all
+cp ${FullSampleName} .
+#cp ${SequencePath}/spider.R .
+pwd
+ls
+
+#Decompress all
+pigz -p8 -d ./*.gz
+
+#Load modules
+module purge
+module load USEARCH
+
+#USEARCH
+usearch -calc_distmx $Sample.fa -tabbedout $Sample.txt -maxdist 0.05 -termdist 0.1 -threads 8
+
+# Termdist and maxdist need to be changed as this produces massive files
+
+# Zip all files
+pigz -p8 *.txt
+
+# Output useful job stats
+/usr/local/bin/showJobStats.scr | gzip > ${Sample}-jobstats.gz
+
+#Make a directory call ${Sample} and cp all gz files into that directory
+mkdir output
+mkdir output/jobstats
+cp ./*.txt.gz output
+cp ./*-jobstats.gz output/jobstats
+
+#Put all output files back where we started
+cp -r output ${SLURM_SUBMIT_DIR}
+rm -rf $tmp_dir
+
+
+```
+
+From this distance matrix...
+Can calculate the probability of lowest common ancestor at different similarities
+
+## Get mixed clusters
+
+```{r analyse uclust}
+# Summarise number of mixed clusters that contain pests at %
+pestlist <- read_csv("primer_evaluation/pestlist.csv") 
+
+# Load primers
+primers <- read_csv("primer_evaluation/primer_candidates.csv") %>%
+  mutate(seq = str_replace_all(seq, "I","N")) 
+
+# Get all possible primer combinations
+combos <- expand_grid(primers %>% filter(strand=="F") %>% pull(seq),
+                      primers %>% filter(strand=="R") %>% pull(seq)
+                      ) %>%
+  mutate_if(is.factor, as.character)%>%
+  unique() %>%
+  magrittr::set_colnames(c("Fseq", "Rseq")) %>%
+  left_join(primers %>% filter(strand=="F") %>% rename_all(. %>% paste0("F",.)), by="Fseq") %>%
+  left_join(primers %>% filter(strand=="R") %>% rename_all(. %>% paste0("R",.)), by="Rseq") %>%
+  mutate(amplicon = Rstart - Fend) %>%
+  filter( amplicon > 100)
+
+# Check missing
+complete <- list.files(path="primer_evaluation/amplicons/uclust_output/", pattern = ".txt.gz") %>%
+  basename %>%
+  str_remove(".txt.gz")
+
+setdiff(paste0(combos$Fname, "_",  combos$Rname), complete)
+setdiff(complete,paste0(combos$Fname, "_",  combos$Rname))
+
+
+# Get mixed clusters
+library(furrr)
+plan(multiprocess)
+mixed_clusters <- fs::dir_ls(path="primer_evaluation/amplicons/uclust_output/", glob = "*.txt.gz")%>%
+  furrr::future_map(function(x){
+  #purrr::map(function(x){
+  df <- vroom::vroom(x, delim="\t", col_names = c("acc1", "acc2", "dist")) %>%
+    dplyr::mutate(spp1 = acc1 %>%
+                    str_remove(";$") %>%
+                    str_remove("^.*;"),
+                  acc1 = acc1 %>% str_remove(";.*$"),
+                  spp2 = acc2 %>%
+                    str_remove(";$") %>%
+                    str_remove("^.*;"),
+                  acc2 = acc2 %>% str_remove(";.*$"),
+                  dist = round(dist, 2)) %>%
+    dplyr::filter(!spp1==spp2)
+
+  all <- df %>%
+        dplyr::group_by(dist) %>% 
+        dplyr::summarise(mixed=n_distinct(spp1)) %>%
+        dplyr::mutate(type="all")
+  pests <- df %>%
+        dplyr::group_by(dist) %>% 
+        filter(spp1 %in% pestlist$Species) %>%
+        dplyr::summarise(mixed=n_distinct(spp1)) %>%
+        dplyr::mutate(type="pest")
+      out <- bind_rows(all, pests)
+      return(out)
+  
+  })%>%  
+    #},.progress = TRUE) %>%
+  bind_rows(.id="source") %>%
+  mutate(source = str_remove(basename(source), ".txt.gz"))
+  
+#Get amplified
+amplified <- fs::dir_ls(path="primer_evaluation/amplicons/", glob = "*.fa.gz") %>%
+   purrr::map(function(x){
+   #furrr::future_map(function(x){
+     df <- fasta.index(x) %>%
+        mutate(species = desc %>% 
+                 str_remove("(?:[^;]*;){7}") %>% #match 7th ;
+                 str_remove(";$")) # match last ;
+     all <- df %>%
+      dplyr::group_by(filepath) %>%
+      dplyr::summarise(seqs_amplified = n(), spp_amplified = n_distinct(species)) %>%
+      dplyr::mutate(type="all")
+     pests <- df %>%
+      dplyr::group_by(filepath) %>%
+      dplyr::filter(species %in% pestlist$Species) %>%
+      dplyr::summarise(seqs_amplified = n(), spp_amplified = n_distinct(species)) %>%
+      dplyr::mutate(type="pest")
+     out <- bind_rows(all, pests)
+    return(out)
+   }) %>%
+  bind_rows() %>%
+  mutate(source = str_remove(basename(filepath), ".fa.gz")) %>%
+  dplyr::select(-filepath)
+
+joint <- mixed_clusters %>%
+  left_join(amplified) %>%
+  mutate(combos = source) %>% 
+  tidyr::separate(source, into=c("Fname", "Rname"), sep="_", extra="merge")
+vroom::vroom_write(joint, "primer_evaluation/amplicons/mixed_clusters_summary.csv", delim=",")
+
+
+## Plot
+
+
+# Count reads
+joint <- vroom::vroom("primer_evaluation/amplicons/mixed_clusters_summary.csv", delim=",") %>%
+  left_join(combos) %>% 
+  mutate(success =  (spp_amplified - mixed)/spp_amplified,
+         threshold = 1-dist) %>%
+  dplyr::select(Fname,Rname, dist, threshold,
+                mixed, type, seqs_amplified,
+                spp_amplified, amplicon, combos, success) 
+
+
+
+# Look at log ratio to the folmer region
+ref <- joint %>% 
+  dplyr::filter(Fname == "LCO1490"&  Rname=="HCO2198") %>% 
+              select(ref_success = success,
+                     dist, threshold, type) %>%
+  dplyr::filter(threshold %in% c(0.97,0.98,0.99, 1))%>%
+  group_by(type) %>%
+  summarise(ref_success = mean(ref_success)) %>%
+  ungroup()
+
+id_success <- joint %>% 
+  dplyr::filter(threshold %in% c(0.97,0.98,0.99, 1))%>%
+  group_by(Fname, Rname, type, combos, amplicon) %>%
+  summarise(success = mean(success)) %>%
+  ungroup() %>%
+  left_join(ref) %>%
+  mutate(success_alr = log(success/ref_success),
+         success_rat = success/ref_success,
+         highlight = case_when(
+           combos %in% c("fwhF2_fwhR2n", "fwhF2_HexCOIR4") ~ TRUE,
+           TRUE ~ FALSE
+         ))
+
+gg.id <- id_success %>%
+  ggplot(aes(x=amplicon, y=success_alr, colour=success_alr))+
+  geom_jitter(width = 5, height=0, alpha=0.5)+
+  geom_smooth(colour="black", method="lm")+
+  #geom_vline(xintercept = 220, colour="grey80") +
+  #geom_vline(xintercept = 420, colour="grey80")+
+  scale_colour_gradient(low ="firebrick", high ="darkslateblue", na.value = "grey") +
+  geom_hline(yintercept=0, colour="grey80")+
+  base_theme+
+  facet_grid(threshold~type) +
+  theme(legend.position = "none") + 
+  labs(x="Amplicon length",
+       y="Log(sucessful ID / LCO-HCO)") 
+
+gg.id
+
+
+## MODEL
+# see whats signfiicant 
+model_dat <- id_success %>%
+  dplyr::select(combos, amplicon, threshold, success_alr) 
+
+library(tidymodels)
+lm_mod <- linear_reg() %>%
+  set_engine("lm") %>%
+  set_mode("regression")  %>%
+  step_normalize(all_predictors())
+
+lm_fit <- 
+  lm_mod %>% 
+  fit(success_alr ~ 0 + amplicon + threshold, data = model_dat)
+
+# Group by theshold?
+tidy(lm_fit)
+
+
+# Write out id
+pdf(file="fig/id_success.pdf", width = 8, height = 11 , paper="a4")
+  plot(gg.id)
+try(dev.off(), silent=TRUE)
+
+library(plotly)
+ggplotly(gg.id)
+
+library(tidytext)
+
+# Barchart
+id_success %>%
+  filter(threshold=="0.97") %>%
+ # group_by(threshold,type) %>%
+  #top_frac(.1, success_alr) %>% 
+  #ungroup() %>%
+  ggplot(aes(x=tidytext::reorder_within(combos, success_alr, threshold), y=success_alr, fill=combos))+
+  geom_col() + 
+  facet_grid(threshold~type, drop=TRUE, scales="free") +
+  scale_x_reordered() +
+  coord_flip() +
+  theme(axis.text.x = element_text(angle=45, hjust=1),
+        legend.position = "none")+
+  base_theme +
+  geom_rangeframe(colour="black")+
+  labs(x="Amplicon length",
+       y="Log(sucessful ID / LCO-HCO)")
+
+# Can i take the mean of the different threshold values?
+
+
+
+```
+
+## ID success on tree
+
+for this we will analyse just the LCO HCO data. Will need to take in the raw amplicons data
+
+Arrange this on the tree and see how much phylogenetic signal there is
+
+The phylogenetic autocorrelation function (ACF) of known 16S GCNs across the SILVA-derived tree (Fig. 1a) was calculated using the castor function get_trait_acf based on 108 tip pairs (options “Npairs=1e8, Nbins=100”), chosen randomly among tips with known GCN. The function get_trait_acf randomly picks OTU pairs on the tree, bins them into one of many intervals of phylogenetic distance, and calculates the Pearson autocorrelation between GCNs of the OTU pairs within each bin. Note that this analysis does not assume that GCNs scale linearly with phylogenetic distance. Instead, the ACF merely measures the statistical correlation between GCNs on distinct tips, conditional upon the tips being within a certain phylogenetic distance from each other.
+
+```{r ID success on tree}
+# Arrange on tree
+library(castor)
+tree <- rncl::read_newick_phylo("reference/ultrametric_insecta_tree.nwk")
+
+# Prune tree to genus
+tips_to_keep <- dat %>%
+  dplyr::select(Kingdom, Phylum, Class, Order, Family, Genus, Species) %>%
+  dplyr::filter(!duplicated(Species)) %>%
+  dplyr::filter(Class=="Insecta") %>%
+  filter(Genus %in% (summaries %>% pull(Genus))) %>%
+  group_by(Genus) %>%
+  dplyr::slice(1) %>%
+  ungroup() %>%
+  mutate(name_check = case_when(
+    str_extract(Species, "^.+?(?=_)") == Genus ~ TRUE,
+    !str_extract(Species, "^.+?(?=_)") == Genus ~ FALSE
+  )) %>%
+  filter(name_check) %>%
+  dplyr::select(-name_check)
+
+tree  <- castor::get_subtree_with_tips(tree,
+                                          omit_tips=setdiff(tree$tip.label, tips_to_keep$Species),
+                                          collapse_monofurcations=TRUE,
+                                          force_keep_root=TRUE)$subtree
+
+#Prune names to genus
+tree$tip.label <- tree$tip.label %>% str_extract("^.+?(?=_)")
+
+Ntips 	<- length(tree$tip.label)
+Nnodes 	<- tree$Nnode
+cat(sprintf("Tree has %d nodes, %d tips and %d edges\n",Nnodes,Ntips,nrow(tree$edge)));
+
+# create internal node labels
+tree$node.label <- NA
+if(is.na(tree$node.label)){
+	cat(sprintf("Adding node labels to full tree..\n"))
+	tree$node.label = paste("node.", 1:Nnodes, sep = "") # don't use underscores, because some tree readers (e.g. rncl) interpret them as spaces
+}
+
+# replace zero-length edges
+if(any(tree$edge.length==0)){
+  epsilon = 0.1*min(tree$edge.length[tree$edge.length>0])
+	cat(sprintf("Note: Some edges have length zero, which may break some of the HSP routines. Replacing zero-lengths with a tiny positive length (%g)..\n",epsilon))
+	tree$edge.length[tree$edge.length==0] = epsilon
+}
+
+
+## Get values for higher nodes with castor
+uprimers <- unique(summaries$primer)
+p_weights <- vector("list", length=length(uprimers))
+for (i in 1:length(uprimers)){
+  print(paste0("Processing Primer ",i, " of ", length(uprimers), ": ", uprimers[i]))
+  tip_states <- summaries %>%
+    dplyr::filter(primer==uprimers[i], Genus %in% tips_to_keep$Genus) %>%
+    group_by(Genus) %>%
+    summarise(values = mean(sum, na.rm=TRUE))%>%
+    ungroup() %>%
+    column_to_rownames("Genus")
+    
+  row2tip <- match(rownames(tip_states), tree$tip.label)
+  tip_states <- tip_states[!is.na(row2tip),,drop = FALSE]
+  hsp_states <- castor::hsp_independent_contrasts(tree = tree,
+                                              tip_states = tip_states$values,
+                                              weighted = TRUE,
+                                              check_input = TRUE)$states
+  
+   p_weights[[i]] <- tip_states %>%
+    rownames_to_column("Genus") %>%
+    mutate(hsp = hsp_states[1:Ntips])
+}
+names(p_weights) <- uprimers
+
+imputed <- summaries %>%
+    left_join(bind_rows(p_weights,.id = "primer"), 
+               by = c("primer", "Genus")) %>%
+  filter(!is.na(hsp))
+
+primer_orders <- imputed %>%
+  group_by(primer) %>%
+  dplyr::summarise(hsp = mean(hsp, na.rm=TRUE), sum = mean(sum, na.rm=TRUE)) %>%
+  arrange(hsp)
+
+# LAbel branches
+tax_groups <- tips_to_keep %>%
+dplyr::rename(label = Genus) %>%
+select(label, Order) %>%
+filter(label %in% tree$tip.label) %>%
+group_by(Order)
+
+group_name <- group_keys(tax_groups)  %>%
+mutate(group_name = Order %>% str_remove_all("\\[|\\]"))
+
+cls <- tax_groups %>%
+group_split() %>%
+purrr::map(pull, label) %>%
+set_names(group_name$group_name)
+
+tree2 <- groupOTU(tree, cls)
+
+# Plot tree
+p1 <- ggtree(tree2, ladderize=TRUE, aes(colour=values)) +
+  geom_text2(aes(subset=!isTip, label=group %>% na_if(0)), hjust=0, check_overlap=TRUE)
+
+weights_p1 <- p1$data %>%
+  left_join(imputed %>%
+              group_by(Genus) %>%
+              summarise(values = mean(sum, na.rm=TRUE))%>%
+              dplyr::rename(label = Genus)
+    )  
+
+
+tip_states <- weights_p1 %>%
+  dplyr::filter(isTip) %>%
+  pull(values)
+names(tip_states) <- weights_p1 %>%
+  dplyr::filter(isTip) %>%
+  pull(label)
+
+weights_p1$values[!weights_p1$isTip] <- castor::asr_independent_contrasts(tree=tree,
+                                                        tip_states=tip_states)$ancestral_states
+
+p2 <- p1 %<+% weights_p1 + geom_tippoint(aes(colour=values)) +
+  scale_color_gradient(low="darkslateblue", high="firebrick") +
+  theme(legend.position = "none") + 
+  scale_y_continuous(expand=c(0,0))+ 
+  scale_x_discrete(expand=c(0,0)) 
+
+
+###################################
+# AUTOCORRELATION FUNCTION OF TRAIT
+
+if(INCLUDE_ACF){
+	cat(sprintf("Calculating ACF and MRD of trait '%s'..\n",trait_name))
+	acf_results = castor::get_trait_acf(known_tree, known_tip_states, Npairs=1e8, Nbins=100)
+
+	# save stats to file
+	cat(sprintf("Saving autocorrelation function to TSV file..\n"))
+	output_path = sprintf("output/ACF.tsv")
+	check_output_file(output_path,TRUE,TRUE,"  ");						
+	cat(sprintf("# Phylogenetic autocorrelation function (ACF) and mean absolute difference (MAD), of '%s' across tips\n# ACF(x) = correlation between the states of two random tips at distance x from each other\n# distance\tautocorrelation\tmean_absolute_deviation\tmean_relative_deviation\tNpairs\n",trait_name), file=output_path, append=FALSE);
+	write.table(x=data.frame(acf_results$distances, acf_results$autocorrelations, acf_results$mean_abs_differences, acf_results$mean_rel_differences, acf_results$Npairs_per_distance), file=output_path, append=TRUE, sep="\t", row.names=FALSE, col.names=FALSE, quote = FALSE);
+
+	# plot ACF
+	cat(sprintf("Plotting ACF..\n"))
+	plot_file=sprintf("output/ACF.pdf")
+	check_output_file(plot_file,TRUE,TRUE,"  ")
+	pdf(file=plot_file, width=DEFAULT_PLOT_WIDTH, height=DEFAULT_PLOT_HEIGHT);
+	par(las=1);
+	plot(x=100*acf_results$distances, y=acf_results$autocorrelations, type="l", col="black", pch=1, cex=0.6, las=1, lwd=1.5, xlab="phylogenetic distance (% substitutions per site)", ylab="autocorrelation", xlim=c(0,80), ylim=c(-0.1,max(acf_results$autocorrelations[acf_results$distances<=1],na.rm=TRUE)));
+	invisible(dev.off());
+
+	# plot MAD
+	cat(sprintf("Plotting MAD..\n"))
+	plot_file=sprintf("output/mean_abs_differences.pdf")
+	check_output_file(plot_file,TRUE,TRUE,"  ")
+	pdf(file=plot_file, width=DEFAULT_PLOT_WIDTH, height=DEFAULT_PLOT_HEIGHT);
+	par(las=1);
+	plot(x=100*acf_results$distances, y=acf_results$mean_abs_differences, type="l", col="black", pch=1, cex=0.6, las=1, lwd=1.5, xlab="phylogenetic distance (% substitutions per site)", ylab="mean abs difference", xlim=c(0,80), ylim=c(-0.1,max(acf_results$mean_abs_differences[acf_results$distances<=1],na.rm=TRUE)));
+	invisible(dev.off());
+	
+	# plot MRD
+	cat(sprintf("Plotting MRD..\n"))
+	plot_file=sprintf("output/mean_rel_differences.pdf")
+	check_output_file(plot_file,TRUE,TRUE,"  ")
+	pdf(file=plot_file, width=DEFAULT_PLOT_WIDTH, height=DEFAULT_PLOT_HEIGHT);
+	par(las=1);
+	plot(x=100*acf_results$distances, y=acf_results$mean_rel_differences, type="l", col="black", pch=1, cex=0.6, las=1, lwd=1.5, xlab="phylogenetic distance (% substitutions per site)", ylab="mean rel difference", xlim=c(0,80), ylim=c(-0.1,max(acf_results$mean_rel_differences[acf_results$distances<=1],na.rm=TRUE)));
+	invisible(dev.off());
+}
+```
+
+
+## Get LCA Probabilities
+
+```{r lca probs}
+## Get LCA probs
+library(furrr)
+plan(multiprocess)
+
+ranks = c("kingdom", 
+    "phylum", "class", "order", "family", 
+    "genus", "species")
+
+lca_probs <- fs::dir_ls(path="primer_evaluation/amplicons/uclust_output/", glob = "*.txt.gz") %>%
+  furrr::future_map(function(x){
+  #purrr::map(function(x){
+    print(x)
+  df <- vroom::vroom(x, delim="\t", col_names = c("acc1", "acc2", "dist")) %>%
+    dplyr::mutate(acc1 = acc1 %>%
+                    str_remove(";$"),
+                  acc2 = acc2 %>%
+                    str_remove(";$"),
+      dist = round(dist, 2),
+                  ) 
+  lca <- df %>%
+    group_by(dist) %>%
+    group_split() %>%
+    purrr::map(function(y){
+      print(unique(y$dist))
+      logidf <- y %>% 
+        tidyr::separate(acc1, into = c("Acc", paste0(ranks, "_1")), sep = ";") %>%
+        tidyr::separate(acc2, into = c("Acc", paste0(ranks, "_2")), sep = ";") %>%
+        transmute(
+          kingdom = case_when(kingdom_1 == kingdom_2 ~ TRUE, TRUE ~ FALSE),
+          phylum = case_when(phylum_1 == phylum_2 ~ TRUE, TRUE ~ FALSE),
+          class = case_when(class_1 == class_2 ~ TRUE, TRUE ~ FALSE),
+          order = case_when(order_1 == order_2 ~ TRUE, TRUE ~ FALSE),
+          family = case_when(family_1 == family_2 ~ TRUE, TRUE ~ FALSE),
+          genus = case_when(genus_1 == genus_2 ~ TRUE, TRUE ~ FALSE),
+          species = case_when(species_1 == species_2 ~ TRUE, TRUE ~ FALSE),
+          ) %>%
+        dplyr::select(rev(ranks)) %>%
+        as.data.frame()
+        keepvec <- apply(logidf, 1, which.max)
+        rows <- seq(as.data.frame(logidf)[, 1])
+        selector <- matrix(ncol = 2, c(rows, keepvec))
+        logidf[selector] <- "KEEP"
+        logidf[!logidf == "KEEP"] <- 0
+        logidf[logidf == "KEEP"] <- 1
+        logidf <- logidf %>%
+          mutate_all(as.numeric) %>%
+          colSums()/length(rows) 
+        out <-as_tibble(logidf, rownames="rank") %>%
+          mutate(dist = unique(y$dist))
+        return(out)
+    }) %>%
+  dplyr::bind_rows() %>% 
+      dplyr::group_by(rank, dist) %>% 
+      dplyr::summarise(prob = mean(value))
+  
+  return(lca)
+  }) %>%
+bind_rows(.id="source") %>%
+mutate(source = str_remove(basename(source), ".txt.gz"))
+
+#Write out lca probabilities
+vroom::vroom_write(lca_probs, "primer_evaluation/lca_probs.csv")
+
+
+# read in lca probabilities
+lca <- vroom::vroom("primer_evaluation/lca_probs.csv") %>%
+  dplyr::rename(name = source)
+
+# Plot out
+gg.lca <- lca %>%
+  dplyr::filter(rank %in% c("species", "genus", "family", "order")) %>%
+  mutate(rank = factor(rank, levels = c("species", "genus", "family", "order"))) %>%
+  ggplot(aes(x=dist, y=prob, colour = name)) +
+  geom_point() +
+  base_theme +
+  facet_wrap(~rank, ncol=1)
+
+gg.lca
+
+pdf(file="fig/lca_probabilities.pdf", width = 8, height = 11 , paper="a4")
+  plot(gg.lca)
+try(dev.off(), silent=TRUE)
+ 
+``` 
+ 
+
+# Off-target amplification
+
+First identify all sequences that have homology to both forward and reverse primers, with the hit sequences placed so that they can actually form a PCR product. 
+First perform a blast search for each primer individually against NT database (or can you do a kmer search with BBDUK?)
+Get accession numbers, get taxonomy for accession numbers
+then compare the lists for forward and reverse primers.
+Any accession number that occurs in both lists needs to be investigated as a potential cross-reacting sequence
+Get taxonomy for all cross reactign sequences, filter to those that are not insecta
+Retrieve all sequences for cross reacting, make new database from those
+Then do in-silico PCR with insect and count how many successfully amplify
+
+```{r off target}
+dir.create("primer_evaluation/off_target/individual", recursive = TRUE)
+# Load primers
+primers <- read_csv("primer_evaluation/primer_candidates.csv") %>%
+  dplyr::filter(!duplicated(name)) %>%
+  mutate(seq = str_replace_all(seq, "I","N")) %>% 
+  mutate(seq =case_when(
+    strand=="F" ~ seq,
+    strand=="R" ~ rc(seq) #Works without RC but RC seems faster
+  )) 
+
+# Disambiguate primers and write out individuals
+seqs <- DECIPHER::Disambiguate(DNAStringSet(primers$seq))
+names(seqs) <- primers$name
+
+for (i in 1:length(seqs)){
+  out <- unlist(seqs[i])
+  #Sample 100 random permutations for degenerate primers
+  out <- sample(out, 100, replace = TRUE) %>%
+    unique()
+  names(out) <- make.unique(names(out), sep="_")
+  writeXStringSet(out, paste0("primer_evaluation/off_target/individual/",names(out[1]),".fa"))
+}
+
+
+dir.create("primer_evaluation/off_target/joined", recursive = TRUE)
+# Get all possible primer combinations
+combos <- expand_grid(primers %>% filter(strand=="F") %>% pull(seq),
+                      primers %>% filter(strand=="R") %>% pull(seq)
+                      ) %>%
+  mutate_if(is.factor, as.character)%>%
+  unique() %>%
+  magrittr::set_colnames(c("Fseq", "Rseq")) %>%
+  left_join(primers %>% filter(strand=="F") %>% rename_all(. %>% paste0("F",.)), by="Fseq") %>%
+  left_join(primers %>% filter(strand=="R") %>% rename_all(. %>% paste0("R",.)), by="Rseq") %>%
+  mutate(amplicon = Rstart - Fend) %>%
+  filter( amplicon > 100) %>%
+  mutate(synthetic = paste0(Fseq,"-", rc(Rseq) )) 
+
+# Write out all combos - takes a while due to extremely high degeneracy!
+for(i in 1:nrow(combos)){
+  print(i)
+  out <- DECIPHER::Disambiguate(DNAStringSet(combos$synthetic[i]))
+  names(out) <- paste0(combos$Fname[i], "_",  combos$Rname[i])
+  out <- unlist(out)
+  # Pad with 20 N's
+  out <- DNAStringSet(sapply(out, str_replace_all, pattern= "-", replacement="NNNNNNNNNNNNNNNNNNNN"))
+  
+  names(out) <- make.unique(names(out), sep="_")
+  writeXStringSet(out, paste0("primer_evaluation/off_target/joined/", names(out[1]),".fa"))
+}
+
+# For the combos should i just take a random sample of 1000? as this is pretty ridiculous
+
+```
+
+# Off target chunked
+
+Output all primer combos, fasta files in chunks of 100
+Do as a BLAST array job
+pull the taxid, and query name
+get only unique taxid
+save that as the results
+Calculate off targets as proportion of insecta to total sequences amplified
+
+Probably dont need to do it for all combos? just do for forward and reverse. Define it as a limitation 
+
+```{r off target}
+dir.create("primer_evaluation/off_target/individual_chunked", recursive = TRUE)
+# Load primers
+primers <- read_csv("primer_evaluation/primer_candidates.csv") %>%
+  dplyr::filter(!duplicated(name)) %>%
+  mutate(seq = str_replace_all(seq, "I","N")) %>% 
+  mutate(seq =case_when(
+    strand=="F" ~ seq,
+    strand=="R" ~ rc(seq) #Works without RC but RC seems faster
+  )) 
+
+# Disambiguate primers and write out individuals
+seqs <- DECIPHER::Disambiguate(DNAStringSet(primers$seq))
+names(seqs) <- primers$name
+
+for (i in 1:length(seqs)){
+  out <- unlist(seqs[i])
+  names(out) <- make.unique(names(out), sep="_") 
+  # Split into chunks of 100
+  chunks <- split(out, ceiling(seq_along(out)/100))
+
+  #write out chunks as seperate files
+  for (c in 1:length(chunks)){
+    filename <- paste0(names(seqs[i]),"_", names(chunks[c]))
+    writeXStringSet(chunks[[c]],
+                    paste0("primer_evaluation/off_target/individual_chunked/",filename,".fa.gz"),
+                    compress = TRUE)
+  }
+}
+```
+
+
+See primerblast paper:
+
+To evaluate specificity, artificial search sequences were generated by concatenating both primer sequences with a 20 base spacer. This ensures that each primer will be treated separately in the BLAST search and thus achieves the equivalent effect of performing a separate BLAST search for each primer. To create a database of potential non-target sequence ampliciations These artificial sequences as well as just the forward and reverse primers were searched against the local NCBI nr database using BLASTn
+
+From primerserver code : https://github.com/billzt/PrimerServer/blob/master/script/_run_specificity_check.pl
+blastn -task blastn-short -query $query_file -db $db_file -evalue 30000 "
+                    ." -word_size 7 -perc_identity60 -dust no -ungapped -reward 1 -penalty -1 "
+                    ." -max_hsps 500 -outfmt '6 qseqid qstart qend sseqid sstart send sstrand' "
+                    ." -out $query_file.$db_name.out -num_threads $run_cpu";
+
+
+Index jobs
+```{bash generate job index}
+#!/bin/bash
+/usr/bin/ls -d $PWD/*.fa.gz | sort -u > sequence_index.txt
+```
+
+Submit array
+
+njobs=$(cat sequence_index.txt | wc -l)
+
+sbatch --array=1-930 primerblast.slurm
+
+sbatch --array=1-4 primerblast.slurm
+
+## BLAST
+```{bash blast}
+#!/bin/bash
+#SBATCH --job-name=BLASTn       
+#SBATCH --ntasks=1 
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=20GB
+#SBATCH --time=240:00:00
+#SBATCH --mail-user=alexander.piper@agriculture.vic.gov.au
+#SBATCH --mail-type=ALL
+#SBATCH --account=pathogens
+#SBATCH --export=none
+
+#Check if job is launched as array
+if [ -z "$SLURM_ARRAY_TASK_COUNT" ]; then 
+  echo SLURM_ARRAY_TASK_COUNT unset; 
+  echo You must launch this job as an array
+  echo see https://slurm.schedmd.com/job_array.html
+  echo for info on how to run arrays
+  exit 1
+fi
+Index=sequence_index.txt
+
+# Make sure that sequence index file is there before we do anything
+if [[ ! -f "${Index}" ]]; then
+  echo "Error sequence index file ${Index} does not exist"
+  exit 1
+fi
+
+#Gather info on our samples
+BlastDB=/group/blastdb/nt
+FullSampleName=$(sed -n ${SLURM_ARRAY_TASK_ID}p ${Index})
+SequencePath=$(dirname ${FullSampleName})
+Sample=$(basename ${FullSampleName} .fa.gz)
+
+# Double check that array index is valid
+if [[ ! -f "${FullSampleName}" ]]; then
+  echo "Error array index doesnt match up with index file"
+  echo "Array index is  ${SLURM_ARRAY_TASK_ID}"
+  exit 1
+fi
+
+# Goto tmp to do our processing
+echo $TMPDIR
+cd $TMPDIR
+tmp_dir=$(mktemp -d -t ci-XXXXXXXXXX)
+cd $tmp_dir
+
+#Copy data files, database and decompress all
+cp ${FullSampleName} .
+pigz -p8 -d ./*.gz
+pwd
+ls
+
+#Load modules
+module purge
+module load BLAST+
+
+###START###
+
+echo ${BlastDB}
+echo ${Sample}
+date
+
+blastn -task blastn-short \
+-query ${Sample}.fa \
+-db  ${BlastDB} \
+-out ${Sample}.out \
+-evalue 30000 \
+-word_size 7 \
+-perc_identity 60 \
+-dust no \
+-ungapped \
+-reward 1 \
+-penalty -1 \
+-max_hsps 1 \
+-max_target_seqs 1000000 \
+-outfmt '6 qseqid qstart qend sseqid staxid sstart send sstrand' \
+-num_threads 8
+
+pigz ${Sample}.out
+
+# Output useful job stats
+/usr/local/bin/showJobStats.scr | gzip > ${Sample}-jobstats.gz
+
+#Make a directory call ${Sample} and cp all output files into that directory
+mkdir ${Sample}_output
+cp ./*.gz ${Sample}_output
+
+date
+
+# put all output files back where we started
+cp -r ${Sample}_output ${SLURM_SUBMIT_DIR}
+```
+
+## Extract fasta of all unique BLAST hits
+```{bash}
+#echo $() >  hits.txt
+#for d in ./*_output/ ; do (cd "$d" && zcat *.out.gz | awk '{print $4}' | awk '{split($0,a,"|"); print a[2]}' | sort -u #>> ../hits.txt ); done
+#cat hits.txt | sort -u > merged_hits.txt
+#
+##blastdbcmd -entry_batch merged_hits.txt -db /group/blastdb/nt -out merged_hits.fa 
 
 ```
 
 
+## Extract taxid of all unique BLAST hits
+
+This loops through all out files in the output subfolders and merges the unique tax_ids into hits
+
+The awk call splits the primer name to remove the chunk ID (ie primer_1 > primer 1 ), then prints just the primer and tax_ids, then call unique
+```{bash}
+echo $() >  hits.txt
+for d in ./*_output/ ; do (cd "$d" && zcat *.out.gz | awk '{split($1,a,"_"); print a[1], $5}'| sort -u >> ../hits.txt ); done
+cat hits.txt | sort -u > merged_hits.txt
+pigz merged_hits.txt
+rm hits.txt
+
+```
 
 
-# Evaluate off target identifications
+## Process hits
 
-Using the trimmed datasets, conduct a pirmerblast using primertree, and plot reuslts, highlighting the non-arthropoda nodes that were produced
+```{r process blast taxonomy}
+# Load primers
+primers <- read_csv("primer_evaluation/primer_candidates.csv") %>%
+  mutate(seq = str_replace_all(seq, "I","N")) %>% 
+  select(-score, -issues) %>%
+  distinct()
 
-modified from: Bylemans J, Gleeson DM, Hardy CM, Furlan E. Toward an ecoregion scale evaluation of eDNA metabarcoding primers: A case study for the freshwater fish biodiversity of the Murray-Darling Basin (Australia). Ecol Evol. 2018;8697–712. 
 
-To reduce the number of primer pairs for further analyses perform an initial screening of primers using PrimerTree
+hits <- vroom::vroom("primer_evaluation/merged_hits.txt.gz", col_names=c("primer", "tax_id"))
+
+db <- taxreturn::get_ncbi_lineage()
+
+off_target <- hits %>% 
+  left_join(db, by="tax_id") %>%
+  mutate(is_arthropod = case_when(
+    phylum=="Arthropoda" ~ TRUE,
+    !phylum=="Arthropoda" ~ FALSE
+  ), is_insect = case_when(
+    class=="Insecta" ~ TRUE,
+    !class=="Insecta" ~ FALSE
+  )) %>%
+  group_by(primer)%>%
+  summarise(freq_arthropod=(sum(is_arthropod, na.rm = TRUE)/n()),
+            freq_insect=(sum(is_insect, na.rm = TRUE)/n()),
+            n=n()
+            ) %>%
+  arrange(freq_arthropod) %>%
+  mutate(name = primer) %>%
+  left_join(primers)
+
+#Relationshup with degeneracy
+off_target %>%
+  pivot_longer(starts_with("freq"),
+               names_to = "type",
+               values_to = "freq") %>%
+  mutate(primer = as.factor(primer),
+         primer = fct_reorder(primer, freq, .desc=FALSE)) %>%
+  ggplot(aes(x=primer, y=freq, fill=degeneracy)) +
+  geom_col() +
+  facet_grid(~type) +
+  base_theme +
+  coord_flip()+
+  theme(legend.position = "bottom") +
+  scale_fill_gradient(low = "darkslateblue" , high ="firebrick", 
+                      na.value = "grey",limits=c(0, 1000), oob = scales::squish)+
+  labs(title = "Fill = Degeneracy",
+       fill = "Primer Degeneracy")
+
+
+# See if its capturing primer length:
+off_target %>%
+  pivot_longer(starts_with("freq"),
+               names_to = "type",
+               values_to = "freq") %>%
+  mutate(primer = as.factor(primer),
+         primer = fct_reorder(primer, freq, .desc=FALSE)) %>%
+  ggplot(aes(x=primer, y=freq, fill=length)) +
+  geom_col() +
+  facet_grid(~type) +
+  base_theme +
+  coord_flip()+
+  theme(legend.position = "bottom") +
+  scale_fill_gradient(low = "darkslateblue" , high ="firebrick", 
+                      na.value = "grey")+
+  labs(title = "Fill = Primer Length",
+       Fill = "Primer length")
+
+# Why are some missing?
+```
+
+# PrimerTree
 
 Note: Detailed information about installing and running PrimerTree can be found at https://github.com/jimhester/primerTree
 
-```{r }
-primers <- read_csv("primer_candidates.csv")
+Could use a slurm array to submit each seperately with all combinatons. 
+Also worth having a function to count degeneracy for the constraints section
+```{r off target}
+primers <- read_csv("primer_evaluation/primer_candidates.csv")
 library(primerTree)
-# 3.1. - Query each primer pair against the NCBI database and construct a primertree object.
-#dat.I <- primers[which(primers$Final=="TRUE"), ]
-dat.I <- dat.passed
+
+
+forward <- "GGDRCWGGWTGAACWGTWTAYCCNCC"
+rev <- "TATDGTRATDGCHCCNGC"
+
+test <- search_primer_pair(
+  forward,
+  rev,
+  api_key ="1c0a0c4afa28448650a1450662a22c68f208",
+  num_permutations = 20
+)
+ranks = c("kingdom", "phylum", "class", 
+    "order", "family", "genus", "species")
+
+lineage <- test3[["taxonomy"]] %>%
+  select(all_of(ranks))%>% 
+  tidyr::unite(col = pathString, 
+  !!ranks, sep = "/") %>%
+  dplyr::mutate(pathString = paste0("Root/", pathString)) %>%
+  data.tree::as.Node(.)
+
+tree <- ape::read.tree(textConnection(data.tree::ToNewick(lineage, heightAttribute = NULL)))
+
+library(ggtree)
+
+ggtree(tree)
+
 
 dir.create("PrimerTree")
 #for (i in 1:nrow(dat.I)) {
@@ -1264,49 +1926,6 @@ gg.coverage
 
 ```
 
-## Create taxonomic classifier
-
-
-```{r Create taxonomic classifier database}
-
-
-
-#Trim to primer region using virtualPCR from insect package
-amplicon <- virtualPCR(filtseqs, up = "ACWGGWTGRACWGTNTAYCC",down= "ARYATDGTRATDGCHCCDGC",cores=3, rcdown = TRUE, trimprimers = TRUE)
-writeFASTA(amplicon,"gb_trimmed.fa")
-
-```
-
-## Evaluate cleanseqs
-
-```{r cleanseqs eval}
-
-#Filtered was then aligned in MAFFT - mafft folmer_insecta_fullength.fa > folmer_insecta_fullength_aligned.fa
-#alignment was then manually curated in geneious primer
-folmer_curated <-  ape::read.dna("folmer_insecta_fullength_aligned_curated.fa",format="fasta")
-model <- aphid::derivePHMM(folmer_curated)
-
-seqs <- readDNAStringSet("test.fasta")
-
-eval <- seq(50,500,50)
-
-result_list <- vector("list", length(eval))
-
-for (i in 1:length(eval)){
-
-#remove non-homologous sequences
-
-#model <- data("model", package="taxreturn")
-load("C:/Users/ap0y/Dropbox/R/taxreturn/data/model.rda")
-result_list[[i]] <- clean_seqs(seqs, model,minscore = i, cores=2, shave=TRUE,maxNs = 0)
-print(eval[i])
-print(result_list[[i]])
-
-}
-
-out <- clean_seqs(seqs, model,minscore = 600, cores=1, shave=TRUE,maxNs = 0)
-
-```
 
 ```{r sessioninfo}
 sessionInfo(package = NULL)
