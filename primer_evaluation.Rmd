@@ -217,16 +217,15 @@ lineage %>%
 
 ```{r primer binding and constraints}
 #alignment was then manually curated in geneious primer
-folmer_curated <-  ape::read.dna("reference/Folmer_insecta_fullength_withprime_curated.fa",format="fasta")
-model <- aphid::derivePHMM(folmer_curated)
+model <- readRDS("reference/folmer_fullength_model.rds")
+
 
 # Be worth validating how the score is calculated?
 primers <- read_csv("primer_evaluation/primer_candidates.csv") %>%
   select(name, strand, seq, citation, issues) %>%
   left_join(.$seq %>% purrr::map(get_binding_position, model, tryrc = TRUE, minscore=8) %>%
-  bind_rows() %>%
-  rename(seq = primer), by="seq") %>%
-  unique()
+              bind_rows() %>%
+              dplyr::rename(seq = primer), by="seq") 
 
 primers <- primers %>%
   left_join(.$seq %>%
