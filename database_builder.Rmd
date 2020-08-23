@@ -335,20 +335,33 @@ insect::writeFASTA(purged, file="reference/07_purged.fa.gz", compress=TRUE)
 ### Make contaminants database
 ```{r fetch wolbachia}
 dir.create("reference/contaminants")
-#Get wolbachia
+# Get wolbachia
 fetchSeqs("wolbachia", database="genbank", out.dir="reference/contaminants", quiet=FALSE, marker="COI OR COI OR COX1 OR COXI", output = "standard", compress=FALSE, force=TRUE, multithread=FALSE)
 
-#Get pseudogenes
+# Get pseudogenes
 fetchSeqs("Insecta", database="genbank", out.dir="reference/contaminants", downstream=FALSE, marker="COI[GENE] AND pseudo OR numt ", output = "standard", compress=TRUE, force=TRUE, multithread =FALSE)
 
-#exclude those without pseudo in name 
+# Exclude those without pseudo in name 
 pseudo <- insect::readFASTA("reference/contaminants/Insecta_COI_AND_pseudo_numt_.fa.gz", compress=TRUE)
 pseudo <- pseudo[str_detect(names(pseudo), "pseudo|numt")]
 insect::writeFASTA(pseudo, "reference/contaminants/Insecta_COI_AND_pseudo_numt_filtered.fa.gz", compress=TRUE)
+
+# Fetch human mitochondria from genbank
+ searchQ <- paste("(", x, "[ORGN])", " AND (", 
+                paste(c(marker), collapse = " OR "), ") AND ", 
+                minlength, ":", maxlength, "[Sequence Length]", 
+                sep = "")
+ids <- rentrez::entrez_search(db = "nuccore", term = "NC_012920", retmax = 9999999, use_history = TRUE)$ids
+dl <- rentrez::entrez_fetch(db = "nuccore", id = ids, rettype = "gb", retmax = 10000)
+gb <- biofiles::gbRecord(rcd = textConnection(dl))
+
+human_mito <- biofiles::getSequence(gb)
+names(human_mito) <- paste0(biofiles::getAccession(gb), " ", biofiles::getDefinition(gb))
+writeXStringSet(human_mito,"reference/contaminants/human_mito.fa")
 ```
 
-### BLAST against wolbachia  & Pseudogenes
-```{r Wolbachia BLAST}
+### BLAST against Contaminants
+```{r Contaminant BLAST}
 # Blast against wolbachia
 taxreturn::blast_install(dest.dir = "bin")
 
@@ -362,29 +375,47 @@ matchlist_pseudo <- taxreturn::blast(query=seqs, db="reference/contaminants/Inse
   as.data.frame()
 write_csv(matchlist_pseudo, "reference/contaminants/matchlist_pseudo.csv")
 
+matchlist_human <- taxreturn::blast(query=seqs, db="reference/contaminants/human_mito.fa", output_format = "tabular", args="-perc_identity 97 -max_target_seqs 10 -max_hsps 10", multithread = FALSE) %>%
+  as.data.frame()
+write_csv(matchlist_human, "reference/contaminants/matchlist_human.csv")
+
 #blastn -db reference/contaminants/Insecta_COI_AND_pseudo_numt_filtered.fa -query reference/blast_query.fa  -outfmt "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore qcovs qcovhsp" -evalue 1e-06 -num_threads 8 -perc_identity 97 -max_target_seqs 10 -max_hsps 10 -out matchlist_pseudo.csv
+
+#blastn -db reference/contaminants/human_mito.fa -query reference/blast_query.fa  -outfmt "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore qcovs qcovhsp" -evalue 1e-06 -num_threads 8 -perc_identity 97 -max_target_seqs 10 -max_hsps 10 -out matchlist_human.csv
 
 # flag clusters with mixed taxonomy at different cluster thresholds and taxonomic ranks
 matchlist_wolb <- vroom::vroom("reference/contaminants/matchlist_wolb.csv", delim=",") %>% 
 dplyr::select(-name)
 matchlist_pseudo <- vroom::vroom("reference/contaminants/matchlist_pseudo.csv", delim="\t", col_names=colnames(matchlist_wolb) )
+matchlist_human <- vroom::vroom("reference/contaminants/matchlist_human.csv", delim="\t", col_names=colnames(matchlist_wolb) )
 
 #Remove sequences that match wolbachia
 rem_wolb <- matchlist_wolb %>%
-  dplyr::filter(qcovs > 80, pident > 80) %>%
-  mutate(acc =str_remove(qseqid, "(?:.(?!;))+$") ) %>%
-  pull(acc)
+  dplyr::filter(qcovs >= 80, pident >= 80) %>%
+  mutate(acc =str_remove(qseqid, "(?:.(?!\\|))+$") ) %>%
+  pull(acc)%>%
+  unique()
 
 rem_pseudo <- matchlist_pseudo %>%
-  dplyr::filter(qcovs > 99, pident > 99) %>%
-  mutate(acc =str_remove(qseqid, "(?:.(?!;))+$") ) %>%
-  pull(acc)
+  dplyr::filter(qcovs >= 99, pident >= 99) %>%
+  mutate(acc =str_remove(qseqid, "(?:.(?!\\|))+$") ) %>%
+  pull(acc) %>%
+  unique()
 
-rem <- unique(c(rem_wolb, rem_pseudo))
+rem_human <- matchlist_human %>%
+  dplyr::filter(qcovs >= 97, pident >= 97) %>%
+  mutate(acc =str_remove(qseqid, "(?:.(?!\\|))+$") ) %>%
+  pull(acc) %>%
+  unique()
 
-table(str_remove(names(seqs), "(?:.(?!;))+$") %in% rem)
+rem_bads <- readLines("reference/contaminants/bad_accessions.txt")
 
-contam_purged  <- subset.DNAbin(seqs, subset = !str_remove(names(seqs), "(?:.(?!;))+$") %in% rem)
+
+rem <- unique(c(rem_wolb, rem_pseudo, rem_human, rem_bads))
+
+table(str_remove(names(seqs), "(?:.(?!\\|))+$") %in% rem)
+
+contam_purged  <- subset.DNAbin(seqs, subset = !str_remove(names(seqs), "(?:.(?!\\|))+$") %in% rem)
 
 length(seqs) - length(contam_purged)
 insect::writeFASTA(contam_purged, file="reference/08_contam_removed.fa.gz", compress=TRUE)
@@ -406,50 +437,119 @@ writeXStringSet(lengthfilt, "reference/09_lengthfilt.fa.gz", compress=TRUE)
 
 ## Prune overrepresented groups
 ```{R prune}
-db <- taxreturn::get_ott_taxonomy(dir="ott3.2")
-
 # Prune large group sizes down to 5
 set.seed(666)
 lengthfilt <- insect::readFASTA("reference/09_lengthfilt.fa.gz")
 pruned <- prune_groups(lengthfilt, maxGroupSize = 5, discardby="length", dedup=TRUE, quiet = FALSE)
 
 # Reformat to full taxonomic heirarchy
-pruned <- reformat_hierarchy(pruned, db, ranks=c("phylum", "class", "order", "family", "genus", "species"), quiet=FALSE)
+db <- taxreturn::get_ott_taxonomy(dir="ott3.2")
+pruned <- reformat_hierarchy(pruned, db, ranks=c("kingdom", "phylum", "class", "order", "family", "genus", "species"), quiet=FALSE)
+
+# Drop sequences with NA taxonomy
+rem <- names(pruned)[str_detect(names(pruned), ";NA;")]
+subset <- pruned[!names(pruned) %in% rem]
+message(paste0(length(pruned) - length(subset), " Sequences with NA's in taxonomy removed"))
+pruned <- subset
 insect::writeFASTA(pruned, file="reference/10_pruned.fa.gz", compress=TRUE)
 ```
 
-# Summarise sequences lost at each stage
+
+# Reformat and Merge in inhouse sequences
+
+```{r reformat seqs}
+# read in  inhouse sequences
+seqs <- readDNAStringSet(list.files("reference/inhouse/", pattern = ".fa", full.names = TRUE))
+
+# Compare mapping to ncbi vs OTT
+db <- taxreturn::get_ott_taxonomy(dir="ott3.2", filter_unplaced = FALSE)
+
+#Get names into same format and map to ott
+names(seqs) <- names(seqs) %>%
+   str_split_fixed(pattern="_", n=2) %>%
+  as.data.frame() %>%
+  mutate(tax_name = str_replace(V2, "_", " ")) %>%
+  mutate(tax_name = case_when(
+    tax_name %in% (anti_join(., db, by="tax_name") %>% pull(tax_name)) ~ tax_name %>% str_remove(pattern="(\\ )(.*?)(?=$)"),
+    !tax_name %in% (anti_join(., db, by="tax_name") %>% pull(tax_name)) ~ tax_name
+  )) %>%
+  left_join(db %>% select(-source, -id) %>% distinct(), by="tax_name") %>% 
+  filter(!duplicated(V1)) %>%
+  mutate(name = paste0(V1,"|", tax_id,";", V2)) %>%
+  mutate(name = str_replace(name, "_", " ")) %>%
+  pull(name)
+
+#Deal with those that had NA species because only genus was in taxonomy
+  
+names <- reformat_hierarchy(seqs, db, quiet=FALSE, ranks=c("phylum", "class", "order", "family", "genus", "species")) %>%
+  names() %>%
+  str_split_fixed(pattern=";", n=Inf) %>%
+  as.data.frame()%>%
+  mutate(V8 = na_if(V8, "NA"))
+
+names$V8[is.na(names$V8)] <- names(seqs)[is.na(names$V8)]%>% str_remove(pattern="^.*;")
+
+names(seqs) <- names %>% tidyr::unite(col="names",1:8, sep = ";") %>%
+  pull(names)
+  
+#filt using phmm
+model <- readRDS("reference/folmer_fullength_model.rds")
+
+filtered <- taxreturn::map_to_model(seqs,  model, minscore = 100,
+ shave=TRUE, check_indels=TRUE,  maxNs = 0,
+ multithread=1, quiet=FALSE, progress = FALSE)
+
+# Filter for stop codons
+codonfilt <- taxreturn::codon_filter(filtered)
+
+# Write out reformatted inhouse 
+insect::writeFASTA(codonfilt, file="reference/inhouse/inhouse_heirarchial.fa", compress = TRUE)
+
+#merge
+inhouse <- insect::readFASTA("reference/inhouse/inhouse_heirarchial.fa")
+
+mergedSeqs <- c((insect::readFASTA(file="reference/10_pruned.fa.gz")), inhouse)
+
+#Remove any non-insect or arachnid as well as duplciate accessions
+mergedSeqs <- filter_by_tax(mergedSeqs, filtrank = "Class", filtvalue =c("Insecta","Arachnida"))
+mergedSeqs <- mergedSeqs[!duplicated(str_remove(names(mergedSeqs), "\\|.*$"))]
+
+
+insect::writeFASTA(mergedSeqs, file="reference/merged_final.fa.gz", compress = TRUE)
+```
+
+# Figure 2 - Sequence summary
 
 ```{r sequence tracker}
 # Create read origins 
 origin <- bind_rows(
   #Genbank Insecta
   fasta.index(list.files("reference/insecta/genbank", pattern = ".fa", full.names = TRUE)) %>%
-  mutate(origin = "genbank_insecta") %>%
+  mutate(origin = "GenBank") %>% #genbank_insecta
   select(origin, desc),
   #BOLD Insecta
   fasta.index(list.files("reference/insecta/bold", pattern = ".fa", full.names = TRUE)) %>%
-  mutate(origin = "bold_insecta") %>%
+  mutate(origin = "BOLD") %>% #bold_insecta
   select(origin, desc),
   #Genbank Arachnida
   fasta.index(list.files("reference/arachnida/genbank", pattern = ".fa", full.names = TRUE)) %>%
-  mutate(origin = "genbank_arachnida") %>%
+  mutate(origin = "GenBank") %>% #genbank_arachnida
   select(origin, desc),
   #BOLD Arachnida
   fasta.index(list.files("reference/arachnida/bold", pattern = ".fa", full.names = TRUE)) %>%
-  mutate(origin = "bold_arachnida") %>%
+  mutate(origin = "BOLD") %>% #bold_arachnida
   select(origin, desc),
-) 
-
-origin <- origin %>%
+) %>%
     mutate(seqid = desc %>%
     str_remove(pattern="(\\|)(.*?)(?=$)") %>%
     str_replace_all(" ", "_") ) %>%
+  distinct() %>%
   mutate(Duplicated = case_when(
     duplicated(seqid) & str_detect(origin, "bold") ~ TRUE,
     TRUE ~ FALSE
     )) %>%
   filter(!Duplicated) %>%   
+  filter(!duplicated(seqid)) %>%
   select(-Duplicated, -desc)
 
 ## summarise number of sequences at each stage and their origins
@@ -483,7 +583,7 @@ tracker <- bind_rows(
                                              origin=origin), 
                   taxreturn::summarise_fasta("reference/10_pruned.fa.gz", 
                                              label="10_pruned",
-                                             origin=origin), 
+                                             origin=origin)
 
 ) %>%
   pivot_longer(cols=starts_with("n"),
@@ -492,121 +592,128 @@ tracker <- bind_rows(
                )
 write_csv(tracker, "reference/sequence_tracker.csv")
 
+tracker <- read_csv("reference/sequence_tracker.csv")
+tracker %>% 
+  group_by(Type, label) %>%
+  summarise(value = sum(value))
+
 gg.cleaning <- tracker %>%
-  #filter(!is.na(origin)) %>%
+  filter(!origin %in% c("genbank_arachnida/genbank_insecta", "bold_arachnida/bold_insecta/genbank_arachnida/genbank_insecta")) %>%
   mutate(Type = Type %>% 
            str_replace("nseqs", "# Sequences") %>%
             str_replace("nspecies", "# Species")) %>%
   ggplot(aes(x=label, y=value, group=origin, fill=origin)) +
-  geom_bar(stat="identity") +
+  geom_col(alpha=0.8) +
   facet_wrap(~Type, nrow=2, ncol=1, scales = "free_y") +
-  scale_fill_brewer(palette="Spectral") +
+  scale_fill_brewer(palette="Paired") +
   xlab("Filter stage") +
   ylab("# Sequences") +
   scale_y_continuous(labels = scales::comma) +
   base_theme + 
-  theme(legend.position="bottom") +
+  theme(legend.position="top",
+        panel.grid = element_blank()) +
   labs(x = "Filter stage",
        y = NULL,
        fill = "Sequence Origin")
-  
+
 gg.cleaning
+# find differences between lenghtfilt and pruned - why does total species reduce? is it hte way its calculated or just those that couldnt be mapped to taxonomy?
 
-pdf(file="fig/database_cleaning_summary.pdf", width = 8, height = 8 , paper="a4r")
-  plot(gg.cleaning)
-try(dev.off(), silent=TRUE)
-```
+# Pre and post pruning
 
-# Reformat and Merge in inhouse sequences
-
-```{r reformat seqs}
-# read in  inhouse sequences
-seqs <- readDNAStringSet(list.files("reference/inhouse/", pattern = ".fa", full.names = TRUE))
-
-# Compare mapping to ncbi vs OTT
-db <- taxreturn::get_ott_taxonomy(dir="ott3.2", filter_unplaced = FALSE)
-
-#Get names into same format and map to ott
-names(seqs) <- names(seqs) %>%
-   str_split_fixed(pattern="_", n=2) %>%
-  as.data.frame() %>%
-  mutate(tax_name = str_replace(V2, "_", " ")) %>%
-  mutate(tax_name = case_when(
-    tax_name %in% (anti_join(., db, by="tax_name") %>% pull(tax_name)) ~ tax_name %>% str_remove(pattern="(\\ )(.*?)(?=$)"),
-    !tax_name %in% (anti_join(., db, by="tax_name") %>% pull(tax_name)) ~ tax_name
+pruning_summary <- Biostrings::fasta.index("reference/09_lengthfilt.fa.gz") %>%
+  bind_rows(Biostrings::fasta.index("reference/10_pruned.fa.gz"))%>%
+  mutate(species = desc %>% str_remove("^.*;")) %>%
+  mutate(stage = case_when(
+    str_detect(filepath, "lengthfilt") ~ "Unpruned",
+    str_detect(filepath, "pruned") ~ "Pruned"
   )) %>%
-  left_join(db %>% select(-source, -id) %>% distinct(), by="tax_name") %>% 
-  filter(!duplicated(V1)) %>%
-  mutate(name = paste0(V1,"|", tax_id,";", V2)) %>%
-  mutate(name = str_replace(name, "_", " ")) %>%
-  pull(name)
+  dplyr::select(species, stage) %>%
+  group_by(species, stage) %>%
+  summarise(n = n())
 
-#Deal with those that had NA species because only genus was in taxonomy
+gg.pruning <- ggplot(pruning_summary, aes(x = stage, y=n, fill=stage)) +
+  geom_boxplot(colour="black", alpha = 0.5) + 
+  base_theme+
+  scale_y_log10() +
+  scale_fill_brewer(palette = "Paired") + 
+  coord_flip()+
+  labs(y = "# Sequences per species", x= NULL) +
+  theme(panel.grid = element_blank()) 
+
+
+# Summary of unique taxa
+seqs <- insect::readFASTA("reference/merged_final.fa.gz")
+
+# Summarise unique ranks
+names(seqs) %>%
+  str_split_fixed(";", n=Inf) %>%
+  as.data.frame() %>%
+  magrittr::set_colnames(c("total", "kingdom", "phylum", "class", "order", "family", "genus", "species")) %>%
+  dplyr::summarise_at(c("total", "kingdom", "phylum", "class", "order", "family", "genus", "species"), n_distinct) 
+
+
+# Plot a taxonomic tree of everything, summarised at the genus level
+tree <- tax2tree(seqs, summarise="Order", output="phylo", replace_bads = TRUE, append_sum = FALSE)
+
+#Pest sums
+pestlist <- read_csv("primer_evaluation/pestlist.csv") 
+
+pest_seqs <- filter_by_tax(seqs, filtrank = "Species", filtvalue = pestlist$Species)
+pest_tree <- tax2tree(pest_seqs, summarise="Order", output="phylo", replace_bads = TRUE, append_sum = FALSE)
+
+# Plot trees
+library(ggnewscale)
+circ <- ggtree(tree, layout = "circular", branch.length = 'none')
+
+circ_dat <- circ$data %>%
+  left_join(names(seqs) %>%
+  str_split_fixed(";", n=Inf) %>%
+  as.data.frame() %>%
+  magrittr::set_colnames(c("total", "kingdom", "phylum", "class", "order", "family", "genus", "species")) %>%
+    dplyr::select(class, label = order)) %>%
+  mutate(class = replace_na(class, "Root"))
+
+circ <- circ %<+% circ_dat + aes(color=class) + scale_color_manual(values=c("#d8b365", "#5ab4ac", "grey80"))
+
+plot_dat <- attr(tree, "sum") %>%
+  enframe() %>%
+  magrittr::set_colnames(c("name", "All")) %>%
+left_join(attr(pest_tree, "sum")%>%
+  enframe() %>%
+  magrittr::set_colnames(c("name", "Pest"))) %>%
+  #mutate(pest = replace_na(pest, 0)) %>%
+  column_to_rownames("name") %>%
+  as.data.frame()
+
+p1 <- gheatmap(circ, plot_dat %>% dplyr::select(Pest), offset=0, width=.4, color="grey80",
+               colnames_angle=95, colnames_offset_y = 0) +
+    scale_fill_viridis_c(option="A", name="Pest Spp.") 
+
+
+p2 <- p1 + new_scale_fill()
+gg.phylo <- gheatmap(p2,  plot_dat %>% dplyr::select(All), offset=1.5, width=.5,
+         colnames_angle=90, colnames_offset_y = 0.2, color="grey80") +
+    scale_fill_viridis_c(option="D", name="All Spp.")+ 
+    geom_tiplab(offset=5, align=FALSE, size=4) 
+
+
+Fig2a <- gg.cleaning / gg.pruning + plot_layout(heights= c(3,1))
+Fig2 <- Fig2a - gg.phylo + plot_layout(widths = c(2,3), ncol = 2)+ 
+  plot_annotation(tag_levels = 'A') 
+
+Fig2
+
+#Save figure 2
+pdf(file="fig/Fig2_database_summary.pdf", width = 11, height = 8 , paper="a4r")
+  plot(Fig2)
+try(dev.off(), silent=TRUE)
   
-names <- reformat_hierarchy(seqs, db, quiet=FALSE) %>%
-  names() %>%
-  str_split_fixed(pattern=";", n=Inf) %>%
-  as.data.frame()%>%
-  mutate(V8 = na_if(V8, "NA"))
-
-names$V8[is.na(names$V8)] <- names(seqs)[is.na(names$V8)]%>% str_remove(pattern="^.*;")
-
-names(seqs) <- names %>% tidyr::unite(col="names",1:8, sep = ";") %>%
-  pull(names)
-  
-#filt using phmm
-model <- readRDS("reference/folmer_fullength_model.rds")
-
-filtered <- taxreturn::map_to_model(seqs,  model, minscore = 100,
- shave=TRUE, check_indels=TRUE,  maxNs = 0,
- multithread=1, quiet=FALSE, progress = FALSE)
-
-# Filter for stop codons
-codonfilt <- taxreturn::codon_filter(filtered)
-
-# Write out reformatted inhouse 
-insect::writeFASTA(codonfilt, file="reference/inhouse/inhouse_heirarchial.fa", compress = TRUE)
-
-#merge
-inhouse <- insect::readFASTA("reference/inhouse/inhouse_heirarchial.fa")
-
-mergedSeqs <- c((insect::readFASTA(file="reference/10_pruned.fa.gz")), inhouse)
-
-#Remove any duplciate accessions
-mergedSeqs <- mergedSeqs[!duplicated(str_remove(names(mergedSeqs), "\\|.*$"))]
-
-insect::writeFASTA(mergedSeqs, file="reference/merged_final.fa.gz", compress = TRUE)
 ```
 
 
-# Output trained classifiers for whole alignment
 
 
-```{r train and output}
-mergedSeqs <- insect::readFASTA("reference/merged_final.fa.gz")
-#Remove any duplciate accessions
-mergedSeqs <- mergedSeqs[!duplicated(str_remove(names(mergedSeqs), "\\|.*$"))]
-
-db <- taxreturn::get_ott_taxonomy(dir="ott3.2", filter_unplaced = FALSE)
-
-dir.create("reference/classifiers")
-
-#No reformatting required for DADA2 assignTaxonomy, use mergedseqs
-insect::writeFASTA(mergedSeqs, "reference/classifiers/rdp_hierarchial_coifolmer.fa.gz", compress=TRUE)
-
-#Format for DADA2 species classifier
-rdp_species <- reformat_dada2_spp(mergedSeqs, quiet=FALSE)
-insect::writeFASTA(rdp_species, "reference/classifiers/rdp_species_coifolmer.fa.gz", compress=TRUE)
-
-# Train IDTAXA
-trainingSet <- train_idtaxa(mergedSeqs)
-#Write out training set
-saveRDS(trainingSet, file="reference/classifiers/idtaxa_coifolmer.rds")
-#Summarise database tree
-summary <- taxreturn::tax2tree(mergedSeqs, output="treedf")
-write_tsv(summary, "reference/classifiers/database_summary_coifolmer.txt")
-
-```
 
 # Create reference set for BF1-BR1 subregion of COI
 
@@ -622,23 +729,49 @@ rem <- names(amplicon)[Biostrings::letterFrequency(amplicon, "-") > maxgaps]
 amplicon <- amplicon[!names(amplicon) %in% rem]
 message(paste0(length(rem), " Sequences with more than ", maxgaps, " gaps removed from alignment"))
   
-writeXStringSet(amplicon,"reference/merged_final_bftrimmed.fa.gz", compress = TRUE)
+insect::writeFASTA(amplicon, "reference/merged_final_bftrimmed.fa.gz", compress=TRUE)
 
-#No reformatting required for DADA2 assignTaxonomy, use mergedseqs
-insect::writeFASTA(amplicon, "reference/classifiers/rdp_hierarchial_bftrimmed.fa.gz", compress=TRUE)
+#Add 'root' rank to match the IDTAXA
+heirarchial <- amplicon
+names(heirarchial) <- names(heirarchial) %>%
+  str_remove(";$") %>% 
+  str_split_fixed(";", n=8) %>%
+  as.data.frame() %>%
+  magrittr::set_colnames(c("acc","kingdom", "phylum", "class", "order", "family", "genus", "species")) %>%
+  mutate(root = "Root") %>%
+  tidyr::unite(name, c("acc", "root","kingdom", "phylum", "class", "order", "family", "genus", "species"), sep=";") %>%
+  pull(name)
+
+heirarchial <- del.gaps(heirarchial)
+insect::writeFASTA(heirarchial, "reference/classifiers/insecta_hierarchial_bftrimmed.fa.gz", compress=TRUE)
 
 #Format for DADA2 species classifier
 rdp_species <- reformat_dada2_spp(amplicon, quiet=FALSE)
-insect::writeFASTA(rdp_species, "reference/classifiers/rdp_species_bftrimmed.fa.gz", compress=TRUE)
+rdp_species <- del.gaps(rdp_species)
+insect::writeFASTA(rdp_species, "reference/classifiers/insecta_binomial_bftrimmed.fa.gz", compress=TRUE)
 
 # Train IDTAXA
 trainingSet <- train_idtaxa(amplicon)
 #Write out training set
 saveRDS(trainingSet, file="reference/classifiers/idtaxa_bftrimmed.rds")
-#Summarise database tree
-summary <- taxreturn::tax2tree(amplicon, output="treedf")
-write_tsv(summary, "reference/classifiers/database_bftrimmed_summary.txt")
 
+#Summarise database
+taxreturn::tax2tree(heirarchial, output="treedf") %>%
+  write_tsv("reference/classifiers/insecta_hierarchial_tree_summary.txt")
+
+names(heirarchial) %>%
+  str_split_fixed(";", n=Inf) %>%
+  as.data.frame() %>%
+  magrittr::set_colnames(c("acc","root", "kingdom", "phylum", "class", "order", "family", "genus", "species")) %>%
+  tidyr::separate(col=acc, into=c("accession", "taxid")) %>%
+  write_csv("reference/classifiers/insecta_hierarchial_alltaxa.csv")
+
+names(heirarchial) %>%
+  str_split_fixed(";", n=Inf) %>%
+  as.data.frame() %>%
+  magrittr::set_colnames(c("total","root", "kingdom", "phylum", "class", "order", "family", "genus", "species")) %>%
+  dplyr::summarise_at(c("total","root", "kingdom", "phylum", "class", "order", "family", "genus", "species"), n_distinct)%>%
+  write_csv("reference/classifiers/insecta_hierarchial_summary.csv")
 ```
 
 
@@ -647,45 +780,38 @@ write_tsv(summary, "reference/classifiers/database_bftrimmed_summary.txt")
 # Constrain by taxonomy
 
 follow this paper https://pages.uoregon.edu/slouca/LoucaLab/SECTION_Publications/MODULE_Publications/Files/Louca2018GCN.pdf
-```{r}
+```{r Make tree}
 # Read in alignment
-seqs <- insect::readFASTA("reference/10_pruned.fa.gz")
+seqs <- insect::readFASTA("reference/merged_final.fa.gz")
 
 # Prune to only insecta
-filt <- names(seqs) %>%
-  str_remove(";$") %>% 
-  str_split_fixed(";", n=8) %>%
-  as.data.frame(stringsAsFactors=FALSE) %>%
-  dplyr::filter(V4 == "Insecta") %>%
-  tidyr::unite(col="output", V1,V2,V3,V4,V5,V6,V7,V8, sep=";") %>%
-  pull(output)
-
-seqs <- seqs[names(seqs) %in% filt]
+pruned <- subset_tax(seqs, filtrank = "Class", filtvalue = "Insecta")
 
 #Prune to 1 representative per taxa
-pruned <- prune_groups(seqs, maxGroupSize = 1, discardby = "length")
+#pruned <- prune_groups(seqs, maxGroupSize = 1, discardby = "length")
 
 # Remove nucleotide positions with > 95% gaps 
-pruned <- ape::del.colgapsonly(pruned, threshold=0.95)
-
-# Write out pruned for tree
-insect::writeFASTA(pruned, "reference/trees/merged_final_1spponly.fa.gz", compress = TRUE)
+nogaps <- as.list(ape::del.colgapsonly(as.matrix(pruned), threshold=0.95))
 
 # Get constraints from full tree
-tree2 <- tax2tree(pruned, output="phylo")
+tree <- tax2tree(nogaps, output="phylo", replace_bads = TRUE)
+
+# problem is due to singletons - phytools ones is better
+#has.singles(tree)
+#test <- collapse.singles(tree, root.edge = FALSE)
 
 # extract tree constraints from taxonomy
-constraints <- castor::extract_fasttree_constraints(tree2)$constraints
+constraints <- castor::extract_fasttree_constraints(tree)$constraints
 
 # Write out constraints as fasta file
-Ntips <- length(tree2$tip.label)
+Ntips <- length(tree$tip.label)
 cat(paste(sapply(1:Ntips, #Ntips
-    FUN=function(tip) sprintf(">%s\n%s\n",tree2$tip.label[tip],
-    paste(as.character(constraints[tip,]),collapse=""))),collapse=""), file="reference/constraints.fa")
+    FUN=function(tip) sprintf(">%s\n%s\n",tree$tip.label[tip],
+    paste(as.character(constraints[tip,]),collapse=""))),collapse=""), file="reference/trees/constraints_fulltree.fa")
 
 
 # Get constraints from only upper level taxonomy
-tree2 <- tax2tree(seqs[1:10000], depth=5, output="phylo")
+tree2 <- tax2tree(nogaps, depth=5, output="phylo", replace_bads = TRUE)
 
 # extract tree constraints from taxonomy
 constraints <- castor::extract_fasttree_constraints(tree2)$constraints
@@ -694,16 +820,33 @@ constraints <- castor::extract_fasttree_constraints(tree2)$constraints
 Ntips <- length(tree2$tip.label)
 cat(paste(sapply(1:Ntips, #Ntips
     FUN=function(tip) sprintf(">%s\n%s\n",tree2$tip.label[tip],
-    paste(as.character(constraints[tip,]),collapse=""))),collapse=""), file="reference/constraints.fa")
+    paste(as.character(constraints[tip,]),collapse=""))),collapse=""), file="reference/trees/constraints_depth5.fa")
+	
+
+# Get constraints for depth 6
+tree3 <- tax2tree(nogaps, depth=6, output="phylo", replace_bads = TRUE)
+
+# extract tree constraints from taxonomy
+constraints <- castor::extract_fasttree_constraints(tree3)$constraints
+
+# Write out constraints as fasta file
+Ntips <- length(tree3$tip.label)
+cat(paste(sapply(1:Ntips, #Ntips
+    FUN=function(tip) sprintf(">%s\n%s\n",tree3$tip.label[tip],
+    paste(as.character(constraints[tip,]),collapse=""))),collapse=""), file="reference/trees/constraints_depth6.fa")
 
 
-
-# Or just split and pull nth
-
+# Write out an alignment with matching names
+out <- nogaps
+names(out) <- names(out) %>%
+  str_remove("\\|.*$") %>%
+  str_replace_all("\\,|\\;|\\:|\\(|\\)|\\[|\\]", "_")
+  # Write out pruned for tree
+insect::writeFASTA(out, "reference/trees/merged_final_nogaps.fa", compress = FALSE)
 ```
 
 
-Get high quality tree of Chesters et al 2017
+Get tree of Chesters et al 2017
 
 ```{r}
 dir.create("reference/trees")
@@ -714,52 +857,27 @@ httr::GET("https://datadryad.org/stash/downloads/file_stream/93335",
 # Read in reference tree
 tree <- read.tree("reference/trees/chesters_2017_species_level_tree.nwk")
 
-
-# Read in reference tree
-tree <- read.tree("reference/trees/supermatrixC_nt_2nd_Threshold-75-ConsensusTree.consensus75_pruned.tre")
 Ntip(tree)
 
 ggtree(tree, ladderize = FALSE) + geom_tiplab() 
 #Need to translate the nameas!
 
 
-# Read in our alignment
-seqs <- insect::readFASTA("reference/10_pruned.fa.gz")
-
-names(seqs) <- names(seqs) %>% 
-  str_remove(";$")
-
-
-# Prune to only insecta
-filt <- names(seqs) %>%
-  str_remove(";$") %>% 
-  str_split_fixed(";", n=8) %>%
-  as.data.frame(stringsAsFactors=FALSE) %>%
-  dplyr::filter(V4 == "Insecta") %>%
-  tidyr::unite(col="output", V1,V2,V3,V4,V5,V6,V7,V8, sep=";") %>%
-  pull(output)
-
-seqs <- seqs[names(seqs) %in% filt]
-
-
-#Prune to 1 representative per taxa
-#pruned <- prune_groups(seqs, maxGroupSize = 1, discardby = "length")
-
-pruned <- seqs
-
 #Subset to species labels only to match reference tree
-name_vec <- names(pruned) %>% 
+chester_align <- nogaps
+
+name_vec <- names(chester_align) %>% 
   str_remove(";$") %>% 
   str_split_fixed(";", n = 8)
 
-names(pruned) <- name_vec[,8] %>%
+names(chester_align) <- name_vec[,8] %>%
   str_replace_all(" ", "_")
 
-pruned <- pruned[!duplicated(names(pruned))]
-insect::writeFASTA(pruned, "reference/merged_final_1spponly.fa.gz", compress = TRUE)
+chester_align <- chester_align[!duplicated(names(chester_align))]
+insect::writeFASTA(chester_align, "reference/merged_final_chester_align.fa.gz", compress = TRUE)
 
 # Get shared tips between two trees
-shared <- intersect(names(pruned), tree$tip.label)
+shared <- intersect(names(chester_align), tree$tip.label)
 length(shared)
 #38520 shared tips
 
@@ -773,14 +891,28 @@ constraints <- castor::extract_fasttree_constraints(tree2)$constraints
 Ntips <- length(tree2$tip.label)
 cat(paste(sapply(1:Ntips, #Ntips
     FUN=function(tip) sprintf(">%s\n%s\n",tree2$tip.label[tip],
-    paste(as.character(constraints[tip,]),collapse=""))),collapse=""), file="reference/constraints.fa")
+    paste(as.character(constraints[tip,]),collapse=""))),collapse=""), file="reference/trees/chester_constraints.fa")
 ```
 
 # Align fasttree using constriants tree
 ```{bash fastree}
 module load FastTree
-FastTree -gtr -cat 20 -constraints reference/constraints.fa -nt reference/merged_final_1spponly.fa > reference/constraint_FastTree.nwk
+FastTree -gtr -cat 20 -constraints constraints_depth5.fa -nt merged_final_nogaps.fa > constraint_depth5_FastTree.nwk
+
+FastTree -gtr -cat 20 -constraints constraints_depth6.fa -nt merged_final_nogaps.fa > constraint_depth6_FastTree.nwk
+
+FastTree -gtr -cat 20 -constraints constraints_fulltree.fa -nt merged_final_nogaps.fa > constraint_fulltree_FastTree.nwk
 ```
+
+# Plot trees
+
+```{r}
+tree1 <- read.tree("reference/trees/constraint_depth5_FastTree.nwk")
+
+ggtree(tree1)
+
+```
+
 
 # Make ultrametric & Date
 ```{r PATHd8}

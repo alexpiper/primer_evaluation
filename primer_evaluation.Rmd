@@ -55,24 +55,7 @@ library(PrimerMiner)
 
 # SOurce internal functions
 source("R/helper_functions.R")
-
-# Define themes
-library(ggthemes)
-base_theme <- theme_minimal()+
-    theme(
-      strip.background = element_blank(),
-      #strip.background = element_rect(colour = "black", fill = "lightgray"),
-      strip.text = element_text(size=9, family = ""),
-      axis.text.x=element_text(angle=45,hjust=1,vjust=1),
-      axis.title.x=element_blank(),
-      plot.background = element_blank(),
-      text = element_text(size=9, family = ""),
-      axis.text = element_text(size=8, family = ""),
-      legend.position = "none",
-      panel.border = element_rect(colour = "black", fill=NA, size=0.5),
-      panel.grid = element_line(size = rel(0.5))
-      )
-
+source("R/themes.R")
 ```
 
 # Assemble pest list
@@ -108,15 +91,22 @@ dat <- list.files("primer_evaluation/pestlist/", pattern = ".csv", full.names = 
   unique()
 
 # Map to OTT taxonomy ids
-taxreturn::download_ott_taxonomy()
-dat_resolved <- dat %>% mutate(Species = map_to_ott(Species, dir="ott3.2", from="ncbi", resolve_synonyms=TRUE, filter_bads=TRUE, remove_na = TRUE, quiet=FALSE)) %>%
-  filter(!is.na(Species))
+db <- taxreturn::get_ott_taxonomy(dir="ott3.2", filter_unplaced = FALSE)
 
-lineage <- get_ott_lineage(dat_resolved$Species, dir="ott3.2")  %>%
+dat_resolved <- dat %>% mutate(mapped =taxreturn::map_to_ott(Species, db, resolve_synonyms=TRUE,  dir="ott3.2", filter_unplaced=TRUE, remove_na = FALSE, quiet=FALSE) ) %>%
+  mutate(Species = mapped %>% str_remove("^.*;"),
+         taxid = mapped %>% str_remove(";.*$") %>% str_remove("^.*\\|") )%>%
+  mutate(taxid = na_if(taxid, "NA")) %>%
+  dplyr::filter(!is.na(taxid)) %>%
+  rownames_to_column("rows") %>%
+  mutate(mapped = mapped %>% str_remove("^NA") %>% paste0(rows, .)) %>%  #Add dummy accession number
+  dplyr::select(-rows)
+
+lineage <- get_ott_lineage(dat_resolved$mapped, db) %>% 
   bind_cols(dat_resolved) %>% 
-  select(-Species)%>%
+  dplyr::select(-mapped, -tax_name, -Species) %>% 
   rename_all(funs(str_to_sentence(.))) %>%
-  filter(Class=="Insecta") %>%
+  filter(Class %in% c("Insecta", "Arachnida")) %>%
   drop_na()
 
 #Write out final list of pests 
@@ -219,19 +209,27 @@ lineage %>%
 #alignment was then manually curated in geneious primer
 model <- readRDS("reference/folmer_fullength_model.rds")
 
-
 # Be worth validating how the score is calculated?
 primers <- read_csv("primer_evaluation/primer_candidates.csv") %>%
   select(name, strand, seq, citation, issues) %>%
   left_join(.$seq %>% purrr::map(get_binding_position, model, tryrc = TRUE, minscore=8) %>%
               bind_rows() %>%
-              dplyr::rename(seq = primer), by="seq") 
+              dplyr::rename(seq = primer), by="seq")%>%
+  distinct()
 
 primers <- primers %>%
   left_join(.$seq %>%
   purrr::map_df(get_primer_statistics, metrics="all", disambiguate=TRUE))
 
 write_csv(primers, "primer_evaluation/primer_candidates.csv")
+
+#Number of unique forward and reverse
+primers %>% 
+  dplyr::select(seq, strand) %>%
+  distinct() %>%
+  pull(strand) %>%
+  table()
+
 ```
 
 ## Primer Presence in seqs
@@ -318,6 +316,7 @@ gg.primerpres
 pdf(file="fig/primerpres.pdf", width = 8, height = 11 , paper="a4")
   plot(gg.primerpres)
 try(dev.off(), silent=TRUE)
+  
 ```
 
 # Primer placement
@@ -325,9 +324,9 @@ try(dev.off(), silent=TRUE)
 ## Whole alignment entropy
 ```{r Align}
 # Get whole alignment entropy
-lengthfilt <- insect::readFASTA("reference/merged_final_aligned.fa.gz")
+seqs <- insect::readFASTA("reference/merged_final.fa.gz")
 
-ent <- taxreturn::alignment_entropy(lengthfilt, maskgaps=1, countgaps=FALSE, method="ML", unit="log")
+ent <- taxreturn::alignment_entropy(seqs, maskgaps=1, countgaps=FALSE, method="ML", unit="log")
 values <- as.data.frame(ent, stringsAsFactors=FALSE) %>%
   rownames_to_column("pos") %>%
   magrittr::set_colnames(c("pos", "value"))
@@ -338,7 +337,7 @@ write_csv(values, "primer_evaluation/whole_alignment_entropy.csv")
 ## Entropy by order
 ```{r subsetting}
 ## Read in aligned & Subset to only fullength
-seqs <- insect::readFASTA("reference/merged_final_aligned.fa.gz")
+seqs <- insect::readFASTA("reference/merged_final.fa.gz")
 seqs <- seqs[lengths(seqs)==712]
 
 # querylevel
@@ -391,6 +390,38 @@ ent_out <- bind_rows(entlist, .id="names")
 write_csv(ent_out,paste0("primer_evaluation/", queryrank,"_ent_out.csv"))
 
 ```
+
+# Get number of sequences at each positiin
+
+```{r bases per position }
+seqs <- insect::readFASTA("reference/merged_final.fa.gz")
+
+seqs <- as.character(seqs)
+seqs <- lapply(seqs, toupper)
+
+MSA <- matrix(as.vector(unlist(seqs)), ncol = length(seqs[[1]]), byrow = TRUE)
+n_pos <- length(MSA[1, ])
+n_seq <- length(MSA[, 1])
+colnames(MSA) <- c(1:n_pos)
+
+#Set DNA alphabet
+names <- c("A", "C", "G", "T")
+
+i = 1
+tab <- vector("list", length = n_pos)
+masked <- vector("list", length = n_pos)
+
+for (i in 1:n_pos) {
+  pos_count <- table(MSA[, i])
+  tab[[i]]  <- sum(pos_count[names(pos_count) %in% names])
+}
+
+out <- unlist(tab)
+names(out) <- seq(1,n_pos,1)
+
+plot(out)
+```
+
 
 ## Figure 2
 ```{r entropy}
@@ -530,14 +561,16 @@ try(dev.off(), silent=TRUE)
 
 # Predicted mismatch
 
+Should be able to multithread this with furrr
+
 ```{r Primerminer, message=FALSE}
 library(PrimerMiner)
 ## Target sequences to test against
-seqs <- insect::readFASTA("reference/merged_final_aligned.fa.gz")
+seqs <- insect::readFASTA("reference/merged_final.fa.gz")
 names(seqs) <- names(seqs) %>% str_replace_all(" ", "_")
-writeFASTA(seqs, "reference/merged_final_aligned_target.fa.gz")
+writeFASTA(seqs, "primer_evaluation/merged_final_target.fa")
 
-target <- "reference/merged_final_aligned_target.fa.gz"
+target <- "primer_evaluation/merged_final_target.fa"
 
 # Load primers
 primers <- read_csv("primer_evaluation/primer_candidates.csv") %>%
@@ -564,6 +597,10 @@ for (i in 1:nrow(primers)) {
  }
 }
 
+# gZip files
+fs::dir_ls(path="primer_evaluation/PrimerMiner", glob = "*.csv") %>%
+  purrr::map(R.utils::gzip)
+
 ```
 
 ## Figure 3
@@ -575,9 +612,11 @@ primers <- read_csv("primer_evaluation/primer_candidates.csv") %>%
   select(-score, -issues)
 
 #Read in all files
+fs::dir_ls(path="primer_evaluation/PrimerMiner", glob = "*.csv")
+
 files <- sort(list.files(list.dirs("primer_evaluation/PrimerMiner/"), pattern = ".csv", full.names = TRUE))
 
-dat <- files %>% 
+dat <- fs::dir_ls(path="primer_evaluation/PrimerMiner", glob = "*.csv|*.csv.gz") %>%
   purrr::set_names() %>%
   map_dfr(vroom::vroom, col_select= list("Template", "sequ", "sum"),
           .id = "source", progress=FALSE) %>%
@@ -604,7 +643,7 @@ summaries <- dat %>%
 
 # Arrange on tree
 library(castor)
-tree <- rncl::read_newick_phylo("reference/ultrametric_insecta_tree.nwk")
+tree <- ape::read.tree("reference/ultrametric_insecta_tree.nwk")
 
 # Prune tree to genus
 tips_to_keep <- dat %>%
@@ -819,7 +858,7 @@ Metrics to evaluate primers on:
 
 ```{r Virtual PCR}
 # Load seqs
-seqs <- readDNAStringSet("reference/merged_final_aligned.fa.gz")
+seqs <- readDNAStringSet("reference/merged_final.fa.gz")
 seqs <- seqs[lengths(seqs)==712]
 
 # Load primers
@@ -837,10 +876,9 @@ combos <- expand_grid(primers %>% filter(strand=="F") %>% pull(seq),
   left_join(primers %>% filter(strand=="F") %>% rename_all(. %>% paste0("F",.)), by="Fseq") %>%
   left_join(primers %>% filter(strand=="R") %>% rename_all(. %>% paste0("R",.)), by="Rseq") %>%
   mutate(amplicon = Rstart - Fend) %>%
-  filter( amplicon > 100)
+  filter(amplicon > 50)
 
 dir.create("primer_evaluation/amplicons")
-
 
 # Setup multithreading
 library(foreach)
@@ -877,105 +915,16 @@ parallel::stopCluster(cl)
 
 Submit array
 
-njobs=$(cat sequence_index.txt | wc -l)
+njobs=$(cat job_index | wc -l)
 sbatch --array=1-808 submit_clustering.slurm
 
-### Index jobs
+### Creat USEARCH distance matrix
 ```{bash generate job index}
 #!/bin/bash
-/usr/bin/ls -d $PWD/* | sed -e '1p' -e '/.fa.gz/!d' | sort -u > sequence_index.txt
-```
-
-sbatch --array=1-807 usearch_distmat.slurm
-
-### Creat USEARCH distance matrix
-
-```{bash usearch}
-#!/bin/bash
-#SBATCH --job-name=usearch       
-#SBATCH --ntasks=1 
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=20GB
-#SBATCH --time=240:00:00
-#SBATCH --mail-user=alexander.piper@agriculture.vic.gov.au
-#SBATCH --mail-type=ALL
-#SBATCH --account=pathogens
-#SBATCH --export=none
-
-
-#Check if job is launched as array
-if [ -z "$SLURM_ARRAY_TASK_COUNT" ]; then 
-  echo SLURM_ARRAY_TASK_COUNT unset; 
-  echo You must launch this job as an array
-  echo see https://slurm.schedmd.com/job_array.html
-  echo for info on how to run arrays
-  exit 1
-fi
-
-Index=sequence_index.txt
-
-# Make sure that sequence index file is there before we do anything
-if [[ ! -f "${Index}" ]]; then
-  echo "Error sequence index file ${Index} does not exist"
-  exit 1
-fi
-
-#Gather info on our samples
-FullSampleName=$(sed -n ${SLURM_ARRAY_TASK_ID}p ${Index})
-SequencePath=$(dirname ${FullSampleName})
-Sample=$(basename ${FullSampleName} .fa.gz)
-
-echo ${FullSampleName}
-echo ${Sample}
-
-# Double check that array index is valid
-if [[ ! -f "${FullSampleName}" ]]; then
-  echo "Error array index doesnt match up with index file"
-  echo "Array index is  ${SLURM_ARRAY_TASK_ID}"
-  exit 1
-fi
-
-# Goto tmp to do our working out
-echo $TMPDIR
-cd $TMPDIR
-tmp_dir=$(mktemp -d -t ci-XXXXXXXXXX)
-cd $tmp_dir
-
-#Copy data files, database and decompress all
-cp ${FullSampleName} .
-#cp ${SequencePath}/spider.R .
-pwd
-ls
-
-#Decompress all
-pigz -p8 -d ./*.gz
-
-#Load modules
-module purge
-module load USEARCH
-
-#USEARCH
-usearch -calc_distmx $Sample.fa -tabbedout $Sample.txt -maxdist 0.05 -termdist 0.1 -threads 8
-
-# Termdist and maxdist need to be changed as this produces massive files
-
-# Zip all files
-pigz -p8 *.txt
-
-# Output useful job stats
-/usr/local/bin/showJobStats.scr | gzip > ${Sample}-jobstats.gz
-
-#Make a directory call ${Sample} and cp all gz files into that directory
-mkdir output
-mkdir output/jobstats
-cp ./*.txt.gz output
-cp ./*-jobstats.gz output/jobstats
-
-#Put all output files back where we started
-cp -r output ${SLURM_SUBMIT_DIR}
-rm -rf $tmp_dir
-
-
+dos2unix bash/usearch_distmat.sh
+/usr/bin/ls -d /group/pathogens/Alexp/Metabarcoding/primer_evaluation/primer_evaluation/amplicons/* | sed -e '1p' -e '/.fa.gz/!d' | sort -u > job_index.txt
+njobs=$(cat job_index.txt | wc -l)
+sbatch --array=1-$njobs bash/usearch_distmat.sh
 ```
 
 From this distance matrix...
