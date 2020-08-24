@@ -28,7 +28,8 @@ editor_options:
                     "TmCalculator",
                     "castor",
                     "furrr",
-                    "tictoc")
+                    "tictoc", 
+                    "UpSetR")
 
 .bioc_packages <- c("DECIPHER",
                     "ggtree",
@@ -50,6 +51,8 @@ sapply(c(.cran_packages,.bioc_packages), require, character.only = TRUE)
 
 # Github packages
 devtools::install_github("alexpiper/taxreturn")
+devtools::install_github("krassowski/complex-upset")
+library(complex-upset)
 library(taxreturn)
 library(PrimerMiner)
 
@@ -116,63 +119,96 @@ write_csv(lineage, "primer_evaluation/pestlist.csv")
 ## Figure 1
 
 ```{r Figure 1}
-lineage <- read_csv(
-  "primer_evaluation/pestlist.csv",
-  col_types  = cols(
-  Acc = col_character(),
-  Kingdom = col_character(),
-  Phylum = col_character(),
-  Class = col_character(),
-  Order = col_character(),
-  Family = col_character(),
-  Genus = col_character(),
-  Species = col_character(),
-  Source = col_character()
-)) %>%
-  unique()
+lineage <- read_csv("primer_evaluation/pestlist.csv") %>%
+  distinct() %>%
+  mutate(Source = Source %>% str_remove("export_")) %>%
+  mutate(Source = case_when(
+    Source == "griis" ~ "GRIIS",
+    Source=="gisd" ~ "GISD",
+    Source=="europealiens" ~ "DAISIE",
+    Source=="eppo" ~ "EPPO",
+    Source=="ashfaq" ~ "Ashfaq et al 2016",
+    Source=="qbank" ~ "Q-Bank",
+    Source=="cabi" ~ "CABI",
+    Source=="pha" ~ "PHA",
+    Source=="vectorbase" ~ "VectorBase",
+    Source=="dawr40" ~ "DAWR Top 40"
+  ))
 
-# Fig 1a - Upset plot of species share between the different databases
 
-sources <- as.character(unique(lineage$Source))
-upsetlist <- list()
-for (i in 1:length(sources)){
-  upsetlist[[i]]= lineage$Species[which(lineage$Source==sources[i])] 
-  names(upsetlist)[[i]] <- sources[i]
-}
+library(ggupset)
+gg.upset <- lineage %>%
+  dplyr::select(Species, Source) %>%
+  group_by(Species) %>%
+  summarise(Source = list(Source)) %>%
+  ggplot(aes(x=Source)) +
+    geom_bar() +
+    scale_x_upset(n_intersections = 25) +
+    base_theme +
+    theme(panel.grid = element_blank()) +
+  labs(x = "Intersection between datasets", y="Intersection size")
 
-Fig1a <- upset(fromList(upsetlist),nsets=length(upsetlist), order.by = "freq")
-print(Fig1a)
+gg.upset
 
-## Figure 1b - summary of families within the dataset 
+# Total set size
+gg.total <- lineage %>%
+  mutate(Source = factor(Source, levels=rev(c("GRIIS", "DAISIE", "EPPO", "Ashfaq et al 2016", "Q-Bank", "CABI", "PHA", "VectorBase", "DAWR Top 40", "GISD")))) %>%
+  mutate(label = case_when(
+   Class == "Insecta" & Order %in% c("Diptera" ,"Coleoptera", "Hemiptera", "Hymenoptera", "Lepidoptera", "Orthoptera") ~ Order,
+  Class == "Arachnida" ~ "Arachnida",
+  Class == "Insecta" & !Order %in% c("Diptera" ,"Coleoptera", "Hemiptera", "Hymenoptera", "Lepidoptera", "Orthoptera") ~ "Other Insects"
+  )) %>%
+  ggplot(aes(x=Source, fill=label))+
+  geom_bar() +
+  scale_fill_brewer(palette="Paired") + 
+  base_theme +
+  labs(x=NULL, y="Total records", fill="Taxon") +
+  coord_flip()+
+  theme(legend.position = "bottom") +
+  scale_y_reverse()
+  
+# PCA of reference database
+#Use unifrac and phylogenetic tree?
 
-library(RColorBrewer)
-col <- colorRampPalette(brewer.pal(11, "Spectral"))(10)
 
-Fig1b <- group_by(lineage, Order, Source) %>%
-  summarise(Genus = n_distinct(Genus), Species = n_distinct(Species)) %>%
-  ungroup() %>%
-  mutate(Order = fct_reorder(Order, -Species)) %>% 
-  ggplot(aes(x = Order, y = Species, fill = Source)) +
-  geom_bar(stat = "identity")  +
-  theme_pubr() +
-  theme(axis.text.x = element_text(angle = 90, hjust = 1,vjust=0)) +
-  scale_fill_manual(values=col) +
-  ylim(-500,2500) +
-  theme_minimal() +
-  theme(
-    axis.text = element_blank(),
-    axis.title = element_blank(),
-    panel.grid = element_blank(),
-    plot.margin = unit(rep(-1,4), "cm")      # Adjust the margin to make in sort labels are not truncated!
-  ) +
-  coord_polar(start=0) +
-  geom_text(data = . %>%
-              dplyr::select(Order, Species) %>%
-              group_by(Order) %>%
-              summarise(value = sum(Species)),
-            aes(x=Order, y=value + 20, label=Order),
-            color="black", fontface="bold", alpha=0.6, inherit.aes = FALSE)
+pca_dat <- lineage %>%
+  dplyr::select(Species, Source) %>%
+  distinct() %>%
+  mutate(value = 1) %>%
+  pivot_wider(names_from = Source, values_from=value, values_fill=0) %>%
+  column_to_rownames("Species")
 
+
+database_pca <- prcomp(vegan::vegdist(t(pca_dat), method="jaccard" ), scale. = TRUE)
+
+gg.database_pca <-database_pca %>%
+  broom::augment() %>%
+    ggplot(aes(.fittedPC1, .fittedPC2, colour=.rownames, fill=.rownames)) +
+    geom_point(size = 4, alpha = 0.8, shape=21, colour="black") +
+  ggrepel::geom_text_repel(aes(label = .rownames, colour=.rownames))+
+    labs(x = paste0("Principal component 1 (",  percent(percent_variation[1]), ")"), 
+         y = paste0("Principal component 2 (",  percent(percent_variation[2]),")")) +
+  geom_vline(xintercept = 0)+
+  geom_hline(yintercept = 0) +
+  base_theme +
+  scale_color_brewer(palette = "Paired") +
+  scale_fill_brewer(palette = "Paired") 
+
+# Assemble figure 1
+
+Fig1a <- gg.database_pca / gg.total + plot_layout(heights = c(2,1))
+
+Fig1b <- gg.upset / grid::textGrob('')+ plot_layout(heights = c(10,1))
+
+Fig1 <- Fig1a - Fig1b +  plot_annotation(tag_levels = 'A') 
+
+Fig1
+
+#Save figure 1
+pdf(file="fig/Fig1_pestlist_summary.pdf", width = 11, height = 8 , paper="a4r")
+  plot(Fig1)
+try(dev.off(), silent=TRUE)
+  
 # Summaries for article text
 
 # Unique taxa
@@ -183,7 +219,6 @@ lineage %>%
             Family = n_distinct(Family),
             Order = n_distinct(Order),
             )
-
 # Sum of reference DB's
 lineage %>% 
   group_by(Source) %>%
@@ -203,7 +238,7 @@ lineage %>%
   arrange(freq)
 ```
 
-# Primer info
+# Primer statistics
 
 ```{r primer binding and constraints}
 #alignment was then manually curated in geneious primer
@@ -245,9 +280,10 @@ primerHits <- function(primer, fn, max.mismatch=0, with.indels=FALSE) {
     return(sum(nhits > 0))
 }
 
-primers <- read_csv("primer_evaluation/primer_candidates.csv") 
+primers <- read_csv("primer_evaluation/primer_candidates.csv") %>%
+  distinct()
 
-fn="reference/merged_final.fa.gz"
+target="reference/merged_final.fa.gz"
 
 out <- vector("list", length=nrow(primers))
 for (i in 1:nrow(primers)){
@@ -264,9 +300,9 @@ for (i in 1:nrow(primers)){
     primer = query,
     strand = primers$strand[i],
     #Hamming distance (no indels in COI)
-    h0 = primerHits(query, fn, max.mismatch=0, with.indels=FALSE),
-    h1 = primerHits(query, fn, max.mismatch=1, with.indels=FALSE),
-    h2 = primerHits(query, fn, max.mismatch=2, with.indels=FALSE),
+    h0 = primerHits(query, target, max.mismatch=0, with.indels=FALSE),
+    h1 = primerHits(query, target, max.mismatch=1, with.indels=FALSE),
+    h2 = primerHits(query, target, max.mismatch=2, with.indels=FALSE),
   )
   out[[i]] <- df
 }
@@ -319,28 +355,15 @@ try(dev.off(), silent=TRUE)
   
 ```
 
-# Primer placement
+# Overview of COI
 
-## Whole alignment entropy
-```{r Align}
+## Entropy
+```{r Entropy}
 # Get whole alignment entropy
-seqs <- insect::readFASTA("reference/merged_final.fa.gz")
-
-ent <- taxreturn::alignment_entropy(seqs, maskgaps=1, countgaps=FALSE, method="ML", unit="log")
-values <- as.data.frame(ent, stringsAsFactors=FALSE) %>%
-  rownames_to_column("pos") %>%
-  magrittr::set_colnames(c("pos", "value"))
-
-write_csv(values, "primer_evaluation/whole_alignment_entropy.csv")
-```
-
-## Entropy by order
-```{r subsetting}
-## Read in aligned & Subset to only fullength
 seqs <- insect::readFASTA("reference/merged_final.fa.gz")
 seqs <- seqs[lengths(seqs)==712]
 
-# querylevel
+## Entropy by individual order
 queryrank <- "order"
 
 # Get unique querieranks
@@ -350,7 +373,7 @@ queries <- names(seqs)  %>%
   magrittr::set_colnames(c("acc", "kingdom", "phylum",
                            "class", "order", "family", 
                            "genus", "species")) %>%
-  filter(class=="Insecta") %>%
+  filter(class %in% c("Insecta", "Arachnida")) %>%
   pull(queryrank) %>%
   unique()
 
@@ -362,81 +385,36 @@ for (i in 1:length(queries)){
   print(i)
   query <- queries[i]
  print(query)
-  names <- names(seqs)  %>% 
-  str_split_fixed(";", n = 8) %>% 
-  as_tibble() %>% 
-  magrittr::set_colnames(c("acc", "kingdom", "phylum",
-                           "class", "order", "family", 
-                           "genus", "species")) %>%
-    filter_at(vars(queryrank), any_vars(.== query)) %>%
-    unite(names,everything(),sep=";")
-  
-  subset <- seqs[names(seqs) %in% names$names]
+ 
+ subset <- filter_by_tax(seqs, filtrank=queryrank, filtvalue=query)
   if (length(subset) > 0){
     nseqs <- length(subset)
     message(nseqs, " sequences for ", query)
-    
     # Get entropies
-    ent <- taxreturn::alignment_entropy(as.list(subset), maskgaps=1, countgaps=FALSE, 
-                                        method="ML", unit="log")
-    entlist[[i]] <- as.data.frame(ent, stringsAsFactors=FALSE) %>%
-      rownames_to_column("pos") %>%
-      magrittr::set_colnames(c("pos", "value")) %>%
-      mutate(nseqs = nseqs)
-      }
+    entlist[[i]] <- taxreturn::alignment_entropy(as.list(subset), maskgaps=1, countgaps=FALSE, 
+                                        method="ML", unit="log", return_extra = TRUE)
+  }
 }
 
 ent_out <- bind_rows(entlist, .id="names")
-write_csv(ent_out,paste0("primer_evaluation/", queryrank,"_ent_out.csv"))
-
+write_csv(ent_out, paste0("primer_evaluation/", queryrank,"_ent_out.csv"))
 ```
 
-# Get number of sequences at each positiin
-
-```{r bases per position }
-seqs <- insect::readFASTA("reference/merged_final.fa.gz")
-
-seqs <- as.character(seqs)
-seqs <- lapply(seqs, toupper)
-
-MSA <- matrix(as.vector(unlist(seqs)), ncol = length(seqs[[1]]), byrow = TRUE)
-n_pos <- length(MSA[1, ])
-n_seq <- length(MSA[, 1])
-colnames(MSA) <- c(1:n_pos)
-
-#Set DNA alphabet
-names <- c("A", "C", "G", "T")
-
-i = 1
-tab <- vector("list", length = n_pos)
-masked <- vector("list", length = n_pos)
-
-for (i in 1:n_pos) {
-  pos_count <- table(MSA[, i])
-  tab[[i]]  <- sum(pos_count[names(pos_count) %in% names])
-}
-
-out <- unlist(tab)
-names(out) <- seq(1,n_pos,1)
-
-plot(out)
-```
-
-
-## Figure 2
-```{r entropy}
-# Read in results
-values <- read_csv("primer_evaluation/order_ent_out.csv") %>% 
-  filter(nseqs > 20) # Filter to only those above 20 seqs
+## Figure 3 
+```{r Figure 3 plotting}
+# Read in per order entropy
+ent <- read_csv("primer_evaluation/order_ent_out.csv") %>% 
+  filter(bases > 20) # Filter to only those above 20 seqs
 
 #Set moving average function - Adjust smoothing (n=5?)
 ma <- function(x, n=3){stats::filter(x, rep(1/n, n), sides=2)}
 
-ent <- values %>%
-  mutate(value = value %>% 
+ent_smoothed <- ent %>%
+  mutate(ent = ent %>% 
            na_if("") %>%
            replace_na(0)) %>%
-  mutate(ma = ma(value, n = 3)) %>%
+  mutate(ma = ma(ent, n = 3)) %>%
+  mutate(ma = ma %>% replace_na(0)) %>%
   mutate(annot = case_when(
     pos %in% seq(from=1, to=2, by=1) ~ "Loop 0",
     pos %in% seq(from=3, to=78, by=1) ~ "Helix 1",
@@ -457,27 +435,126 @@ ent <- values %>%
   ))  
 
 ## plot entropy by order
-gg.line <- ent %>%
+colourCount = length(unique(ent_smoothed$names))
+getPalette = colorRampPalette(brewer.pal(9, "Paired"))
+
+gg.separate_ent <- ent_smoothed %>%
   group_by(pos) %>%
   mutate(median = median(ma)) %>%
   ggplot(aes(x = pos, y=ma, colour=names)) + 
-  geom_line(aes(x = pos, y=ma),size=1, inherit.aes = FALSE) +
-  facet_wrap(~names)
+  geom_line(aes(x = pos, y=ma)) +
+  facet_wrap(~names, ncol=3) +
+  base_theme +
+  labs(
+    x="Position within COI barcode locus",
+    y="Shannons Entropy (H)")  +
+  scale_color_manual(values = getPalette(colourCount))+
+  scale_x_continuous(limits = c(0, 712), expand=c(0,0))
+
+gg.separate_ent
+pdf(file="fig/supplementary/all_orders_entropy.pdf", width = 8, height = 11 , paper="a4")
+  plot(gg.separate_ent)
+try(dev.off(), silent=TRUE)
+
 
 # Plot entropy of COI Gene
-gg.box <- ent %>%
+gg.entropy <- ent_smoothed %>%
   group_by(pos) %>%
   mutate(median = median(ma)) %>%
   ggplot(aes(x = pos, y=ma, group=pos, colour=structure)) + 
   geom_boxplot(outlier.shape = NA, alpha=0.8) +
   geom_line(aes(x = pos, y=median),size=1, inherit.aes = FALSE) + #, colour="black"
-  #?geom_tufteboxplot(median.type = "point", whisker.type = "line", hoffset = 0) +
   theme_classic() +    
-  theme(legend.position = "bottom") +
-  ylab("Entropy") +
-  xlab("Position within COI folmer region") +
-  scale_color_manual(values=c("#ca0020", "#0571b0")) +
+  theme(legend.position = "none") +
+  labs(
+    x="Position within COI barcode locus",
+    y="Shannons Entropy (H)",
+    colour="3D structure") +
+  scale_color_manual(values=c("#e31a1c","#1f78b4")) +
   scale_x_continuous(limits = c(0, 712), breaks=seq(0,700,50), expand=c(0,0)) 
+
+# Plot number of sequence across whole gene
+gg.sequences <- ent_smoothed %>%
+  group_by(pos) %>%
+  summarise(bases = sum(bases), structure) %>%
+  ggplot(aes(x = pos, y=bases)) + 
+  geom_line()+
+  #geom_boxplot(outlier.shape = NA, alpha=0.8) +
+  theme_classic() +    
+  theme(legend.position = "none") +
+  labs(
+    x="Position within COI barcode locus",
+    y="# Sequences", colour=NULL) +
+  scale_x_continuous(limits = c(0, 712), breaks=seq(0,700,50), expand=c(0,0)) +
+  scale_color_manual(values=c("#e31a1c","#1f78b4")) 
+
+
+## Primers
+range_join <- function(x, y, value, range_start, range_stop){
+  if(!any(stringr::str_detect(colnames(y), range_start)) | !any(stringr::str_detect(colnames(y), range_stop))){
+    stop("Arguments range_start and range_stop must be valid columns in y")
+  }
+  splits <- split(y, 1:nrow(y))
+  out <- tibble()
+  for (i in 1:length(splits)){ 
+    y_ <- splits[[i]]
+    dat <- x[x[[value]] >= y_[[range_start]] & x[[value]] < y_[[range_stop]],]     
+    if(nrow(dat) > 0)      
+      out <-  out %>% bind_rows(dat %>% cbind(y_))  
+  }
+  return(out)
+}
+
+primers <- read_csv("primer_evaluation/primer_candidates.csv") %>% 
+  distinct()
+
+#Add ranks in overlapping windows to arrange y by
+windowsize=130
+
+primer_windows <- primers %>%
+  range_join(
+    enframe(seq(min(primers$start), max(primers$end + 100), by = windowsize)) %>%
+    dplyr::rename(window= name, winend=value) %>%
+    mutate(winstart = winend - windowsize), value="start", range_start="winstart", range_stop="winend") %>%
+  group_by(window) %>%
+  arrange(start) %>%
+  mutate(rank=row_number()) %>%
+  ungroup()
+
+gg.primers <- ggplot(data=ent_smoothed[ent_smoothed$pos==1,], aes(x = as.numeric(pos))) +
+  geom_segment(data = primer_windows %>% filter(strand=="F"),
+               aes(x = start, xend = end,
+                   y = rank, yend = rank,
+                   colour=strand), size = 1, arrow = arrow(length = unit(0.3,"cm")),
+               show.legend = FALSE) +
+  geom_text(data = primer_windows %>% filter(strand=="F"),
+            aes(x = start, y = rank,
+                label = name , colour=strand),
+            hjust = 1, show.legend = FALSE) +
+  geom_segment(data = primer_windows %>% filter(strand=="R"),
+               aes(x = end, xend = start,
+                   y = rank, yend = rank,
+                   colour=strand), size = 1,
+               arrow = arrow(length = unit(0.3,"cm")),
+               show.legend = FALSE) +
+  geom_text(data = primer_windows %>% filter(strand=="R"),
+            aes(x = end, y = rank,
+                label = name, colour=strand),
+            hjust = 0, show.legend = FALSE)  +
+  scale_x_continuous(limits = c(0, 712), breaks=seq(0,700,50), expand=c(0,0)) +
+  theme_void()+
+    labs(x="Position within COI barcode locus", y=NULL, colour=NULL)  +
+  scale_color_manual(values=c("#e31a1c","#1f78b4"))
+
+gg.primers
+
+Fig3 <- gg.box / gg.primers / gg.sequences + plot_layout(heights= c(3, 3, 0.5))  +  plot_annotation(tag_levels = 'A') 
+
+Fig3
+
+pdf(file="fig/Fig3_COI_overview.pdf", width = 11, height = 8 , paper="a4r")
+  plot(Fig3)
+try(dev.off(), silent=TRUE)
 
 # Sliding window of entropy
 sw <- function(x, width, interval = 1){
@@ -490,11 +567,11 @@ sw <- function(x, width, interval = 1){
   return(out)
 }
 
-ent_sw <- values %>%
+ent_sw <- ent %>%
   group_by(names) %>%
-  mutate(sw220 = sw(value, width=220, interval = 1)/220) %>%
-  mutate(sw420 = sw(value, width=420, interval = 1)/420) %>%
-  mutate(sw20 = sw(value, width=20, interval = 1)/20) %>% #For primers
+  mutate(sw220 = sw(ent, width=220, interval = 1)/220) %>%
+  mutate(sw420 = sw(ent, width=420, interval = 1)/420) %>%
+  mutate(sw20 = sw(ent, width=20, interval = 1)/20) %>% #For primers
   ungroup()%>%
   pivot_longer(starts_with("sw"),
                names_to = "windowsize",
@@ -517,46 +594,9 @@ gg.density <-  ent_sw %>%
         axis.ticks.y = element_blank(),
         axis.title.y = element_blank())
 
-
-## Primers
-primers <- read_csv("primer_evaluation/primer_candidates.csv")
-
-Fprimerpos <- seq(1,nrow(primers %>% filter(strand=="F")),1)/1000
-Rprimerpos <- seq(1,nrow(primers %>% filter(strand=="R")),1)/1000
-
-gg.primers <- ggplot(data=values[values$pos==1,], aes(x = as.numeric(pos))) +
-  geom_segment(data = primers %>% filter(strand=="F"),
-               aes(x = start, xend = end,
-                   y = Fprimerpos, yend = Fprimerpos,
-                   colour=strand), size = 1, arrow = arrow(length = unit(0.3,"cm")),
-               show.legend = FALSE) +
-  geom_text(data = primers %>% filter(strand=="F"),
-            aes(x = start, y = Fprimerpos,
-                label = name , colour=strand),
-            hjust = 1, show.legend = FALSE) +
-  geom_segment(data = primers %>% filter(strand=="R"),
-               aes(x = end, xend = start,
-                   y = Rprimerpos, yend = Rprimerpos,
-                   colour=strand), size = 1,
-               arrow = arrow(length = unit(0.3,"cm")),
-               show.legend = FALSE) +
-  geom_text(data = primers %>% filter(strand=="R"),
-            aes(x = end, y = Rprimerpos,
-                label = name, colour=strand),
-            hjust = 0, show.legend = FALSE)  +
-  scale_x_continuous(limits = c(0, 712), breaks=seq(0,700,50), expand=c(0,0)) +
-  theme_classic()  +
-  theme(legend.position = "none",
-        axis.text = element_blank(),
-        axis.ticks = element_blank(),
-        axis.title = element_blank())
-
-Fig2 <- gg.box / gg.density / gg.primers 
-
-pdf(file="fig/Fig2.pdf", width = 11, height = 8 , paper="a4r")
-  plot(Fig2)
-try(dev.off(), silent=TRUE)
+gg.density
  
+
 ```
 
 # Predicted mismatch
@@ -603,7 +643,7 @@ fs::dir_ls(path="primer_evaluation/PrimerMiner", glob = "*.csv") %>%
 
 ```
 
-## Figure 3
+## Figure 4 - Identiication sucesss
 
 ```{r figure 4}
 # Load primers
