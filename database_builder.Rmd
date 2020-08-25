@@ -916,17 +916,56 @@ ggtree(tree1)
 
 # Make ultrametric & Date
 ```{r PATHd8}
-tree <- read.tree("reference/constraint_FastTree.nwk")
+tree <- read.tree("reference/trees/constraint_depth5_FastTree.nwk")
+
+# Get species names
+seqs <- insect::readFASTA("reference/merged_final.fa.gz")
+
+names <- names(seqs) %>%
+  str_split_fixed(";", n=8) %>%
+  as_tibble() %>%
+  tidyr::separate(V1, into=c("acc", "taxid"), sep="\\|") %>%
+  mutate(acc = acc %>%stringr::str_replace_all("\\,|\\;|\\:|\\(|\\)|\\[|\\]", 
+        "_"))
+
+
+# Set names back to species
+tree$tip.label <- tree$tip.label %>% 
+  enframe() %>% 
+  dplyr::rename(acc = value) %>%
+  left_join(names) %>%
+  mutate(spp = V8 %>% str_replace_all(" ", "_")) %>%
+  pull(spp)
+
 
 # Date usign congruify
-ref_tree <- read.tree("reference/chesters_2017_species_level_tree.nwk")
+ref_tree <- read.tree("reference/trees/chesters_2017_species_level_tree.nwk")
+
+
+
+
 
 table(tree$tip.label %in% ref_tree$tip.label)
 #38520 congruent tips
 
 library(geiger)
 res <- congruify.phylo(reference=ref_tree, target=tree, scale="PATHd8")
-write.tree(res$phy, "reference/ultrametric_insecta_tree.nwk")
+write.tree(res$phy, "reference/ultrametric_insecta_tree_depth5.nwk")
+
+subtreeing = castor::get_subtree_with_tips(ref_tree, only_tips=tree$tip.label)
+subtree = subtreeing$subtree
+
+# map subset of target tips to reference tips
+mapping = matrix(c(subtreeing$new2old_tip,(1:Ntip(subtree))), ncol=2, byrow=FALSE)
+
+congruification <- congruent_divergence_times(reference_tree=ref_tree, target_tree=tree, mapping)
+
+pathd8(tree, exec = "~/PATHd8", seql, calibration)
+
+cat("Concordant target nodes:\n")
+print(congruification$target_nodes)
+cat("Ages of concordant nodes:\n")
+print(congruification$ages)
 
 
 # Alternatively, castor has - congruent_divergence_times

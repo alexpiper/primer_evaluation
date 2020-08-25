@@ -643,18 +643,16 @@ fs::dir_ls(path="primer_evaluation/PrimerMiner", glob = "*.csv") %>%
 
 ```
 
-## Figure 4 - Identiication sucesss
+## Figure 4 - Mismatch
 
 ```{r figure 4}
 # Load primers
 primers <- read_csv("primer_evaluation/primer_candidates.csv") %>%
   mutate(seq = str_replace_all(seq, "I","N")) %>% 
-  select(-score, -issues)
+  select(-score, -issues) %>%
+  distinct()
 
 #Read in all files
-fs::dir_ls(path="primer_evaluation/PrimerMiner", glob = "*.csv")
-
-files <- sort(list.files(list.dirs("primer_evaluation/PrimerMiner/"), pattern = ".csv", full.names = TRUE))
 
 dat <- fs::dir_ls(path="primer_evaluation/PrimerMiner", glob = "*.csv|*.csv.gz") %>%
   purrr::set_names() %>%
@@ -681,9 +679,15 @@ summaries <- dat %>%
     primer %in% unique(primers %>% filter(strand=="R") %>% pull(name)) ~ "Reverse"
     ))  
 
+write_csv(summaries, "primer_evaluation/mismatch_summary.csv")
+R.utils::gzip("primer_evaluation/mismatch_summary.csv")
+
+summaries <- vroom::vroom("primer_evaluation/mismatch_summary.csv.gz", delim = ",") %>%
+  dplyr::select(-dir)
+
 # Arrange on tree
 library(castor)
-tree <- ape::read.tree("reference/ultrametric_insecta_tree.nwk")
+tree <- ape::read.tree("reference/")
 
 # Prune tree to genus
 tips_to_keep <- dat %>%
@@ -978,7 +982,8 @@ pestlist <- read_csv("primer_evaluation/pestlist.csv")
 
 # Load primers
 primers <- read_csv("primer_evaluation/primer_candidates.csv") %>%
-  mutate(seq = str_replace_all(seq, "I","N")) 
+  mutate(seq = str_replace_all(seq, "I","N"))  %>%
+  distinct()
 
 # Get all possible primer combinations
 combos <- expand_grid(primers %>% filter(strand=="F") %>% pull(seq),
@@ -993,7 +998,7 @@ combos <- expand_grid(primers %>% filter(strand=="F") %>% pull(seq),
   filter( amplicon > 100)
 
 # Check missing
-complete <- list.files(path="primer_evaluation/amplicons/uclust_output/", pattern = ".txt.gz") %>%
+complete <- list.files(path="primer_evaluation/amplicons/usearch_output/", pattern = ".txt.gz") %>%
   basename %>%
   str_remove(".txt.gz")
 
@@ -1003,8 +1008,8 @@ setdiff(complete,paste0(combos$Fname, "_",  combos$Rname))
 
 # Get mixed clusters
 library(furrr)
-plan(multiprocess)
-mixed_clusters <- fs::dir_ls(path="primer_evaluation/amplicons/uclust_output/", glob = "*.txt.gz")%>%
+plan(multiprocess, workers=4)
+mixed_clusters <- fs::dir_ls(path="primer_evaluation/amplicons/usearch_output/", glob = "*.txt.gz")%>%
   furrr::future_map(function(x){
   #purrr::map(function(x){
   df <- vroom::vroom(x, delim="\t", col_names = c("acc1", "acc2", "dist")) %>%
@@ -1031,8 +1036,7 @@ mixed_clusters <- fs::dir_ls(path="primer_evaluation/amplicons/uclust_output/", 
       out <- bind_rows(all, pests)
       return(out)
   
-  })%>%  
-    #},.progress = TRUE) %>%
+  })%>%
   bind_rows(.id="source") %>%
   mutate(source = str_remove(basename(source), ".txt.gz"))
   
