@@ -788,7 +788,7 @@ seqs <- insect::readFASTA("reference/merged_final.fa.gz")
 pruned <- subset_tax(seqs, filtrank = "Class", filtvalue = "Insecta")
 
 #Prune to 1 representative per taxa
-#pruned <- prune_groups(seqs, maxGroupSize = 1, discardby = "length")
+pruned <- prune_groups(seqs, maxGroupSize = 1, discardby = "length")
 
 # Remove nucleotide positions with > 95% gaps 
 nogaps <- as.list(ape::del.colgapsonly(as.matrix(pruned), threshold=0.95))
@@ -940,10 +940,6 @@ tree$tip.label <- tree$tip.label %>%
 
 # Date usign congruify
 ref_tree <- read.tree("reference/trees/chesters_2017_species_level_tree.nwk")
-
-
-
-
 
 table(tree$tip.label %in% ref_tree$tip.label)
 #38520 congruent tips

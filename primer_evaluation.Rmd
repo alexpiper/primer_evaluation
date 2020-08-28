@@ -1097,7 +1097,7 @@ ref <- joint %>%
 
 id_success <- joint %>% 
   dplyr::filter(threshold %in% c(0.97,0.98,0.99, 1))%>%
-  group_by(Fname, Rname, type, combos, amplicon) %>%
+  group_by(Fname, Rname, type, combos, amplicon, threshold) %>%
   summarise(success = mean(success)) %>%
   ungroup() %>%
   left_join(ref) %>%
