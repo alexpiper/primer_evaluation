@@ -25,7 +25,8 @@ knitr::opts_chunk$set(echo = TRUE, eval=FALSE, message=FALSE,error=FALSE,fig.sho
                     "ShortRead",
                     "patchwork",
                     "geiger",
-                    "castor")
+                    "castor",
+                    "phytools")
 
 .bioc_packages <- c("DECIPHER",
                     "ggtree",
@@ -712,9 +713,6 @@ try(dev.off(), silent=TRUE)
 ```
 
 
-
-
-
 # Create reference set for BF1-BR1 subregion of COI
 
 While trimming the reference database to just the subregion does not necessarily affect the results of IDTAXA, it does dramatically decrease the size and increase the speed of classification with it
@@ -774,205 +772,6 @@ names(heirarchial) %>%
   write_csv("reference/classifiers/insecta_hierarchial_summary.csv")
 ```
 
-
-# Create tree with fasttree for phylogenetic classification
-
-# Constrain by taxonomy
-
-follow this paper https://pages.uoregon.edu/slouca/LoucaLab/SECTION_Publications/MODULE_Publications/Files/Louca2018GCN.pdf
-```{r Make tree}
-# Read in alignment
-seqs <- insect::readFASTA("reference/merged_final.fa.gz")
-
-# Prune to only insecta
-pruned <- subset_tax(seqs, filtrank = "Class", filtvalue = "Insecta")
-
-#Prune to 1 representative per taxa
-pruned <- prune_groups(seqs, maxGroupSize = 1, discardby = "length")
-
-# Remove nucleotide positions with > 95% gaps 
-nogaps <- as.list(ape::del.colgapsonly(as.matrix(pruned), threshold=0.95))
-
-# Get constraints from full tree
-tree <- tax2tree(nogaps, output="phylo", replace_bads = TRUE)
-
-# problem is due to singletons - phytools ones is better
-#has.singles(tree)
-#test <- collapse.singles(tree, root.edge = FALSE)
-
-# extract tree constraints from taxonomy
-constraints <- castor::extract_fasttree_constraints(tree)$constraints
-
-# Write out constraints as fasta file
-Ntips <- length(tree$tip.label)
-cat(paste(sapply(1:Ntips, #Ntips
-    FUN=function(tip) sprintf(">%s\n%s\n",tree$tip.label[tip],
-    paste(as.character(constraints[tip,]),collapse=""))),collapse=""), file="reference/trees/constraints_fulltree.fa")
-
-
-# Get constraints from only upper level taxonomy
-tree2 <- tax2tree(nogaps, depth=5, output="phylo", replace_bads = TRUE)
-
-# extract tree constraints from taxonomy
-constraints <- castor::extract_fasttree_constraints(tree2)$constraints
-
-# Write out constraints as fasta file
-Ntips <- length(tree2$tip.label)
-cat(paste(sapply(1:Ntips, #Ntips
-    FUN=function(tip) sprintf(">%s\n%s\n",tree2$tip.label[tip],
-    paste(as.character(constraints[tip,]),collapse=""))),collapse=""), file="reference/trees/constraints_depth5.fa")
-	
-
-# Get constraints for depth 6
-tree3 <- tax2tree(nogaps, depth=6, output="phylo", replace_bads = TRUE)
-
-# extract tree constraints from taxonomy
-constraints <- castor::extract_fasttree_constraints(tree3)$constraints
-
-# Write out constraints as fasta file
-Ntips <- length(tree3$tip.label)
-cat(paste(sapply(1:Ntips, #Ntips
-    FUN=function(tip) sprintf(">%s\n%s\n",tree3$tip.label[tip],
-    paste(as.character(constraints[tip,]),collapse=""))),collapse=""), file="reference/trees/constraints_depth6.fa")
-
-
-# Write out an alignment with matching names
-out <- nogaps
-names(out) <- names(out) %>%
-  str_remove("\\|.*$") %>%
-  str_replace_all("\\,|\\;|\\:|\\(|\\)|\\[|\\]", "_")
-  # Write out pruned for tree
-insect::writeFASTA(out, "reference/trees/merged_final_nogaps.fa", compress = FALSE)
-```
-
-
-Get tree of Chesters et al 2017
-
-```{r}
-dir.create("reference/trees")
-# Get trees
-httr::GET("https://datadryad.org/stash/downloads/file_stream/93335",
-          httr::write_disk("reference/trees/chesters_2017_species_level_tree.nwk", overwrite = TRUE))
-
-# Read in reference tree
-tree <- read.tree("reference/trees/chesters_2017_species_level_tree.nwk")
-
-Ntip(tree)
-
-ggtree(tree, ladderize = FALSE) + geom_tiplab() 
-#Need to translate the nameas!
-
-
-#Subset to species labels only to match reference tree
-chester_align <- nogaps
-
-name_vec <- names(chester_align) %>% 
-  str_remove(";$") %>% 
-  str_split_fixed(";", n = 8)
-
-names(chester_align) <- name_vec[,8] %>%
-  str_replace_all(" ", "_")
-
-chester_align <- chester_align[!duplicated(names(chester_align))]
-insect::writeFASTA(chester_align, "reference/merged_final_chester_align.fa.gz", compress = TRUE)
-
-# Get shared tips between two trees
-shared <- intersect(names(chester_align), tree$tip.label)
-length(shared)
-#38520 shared tips
-
-# Drop unshared tips from reference tree
-tree2 <- drop.tip(tree, tree$tip.label[!tree$tip.label %in% shared])
-
-# extract tree constraints
-constraints <- castor::extract_fasttree_constraints(tree2)$constraints
-
-# Write out constraints as fasta file
-Ntips <- length(tree2$tip.label)
-cat(paste(sapply(1:Ntips, #Ntips
-    FUN=function(tip) sprintf(">%s\n%s\n",tree2$tip.label[tip],
-    paste(as.character(constraints[tip,]),collapse=""))),collapse=""), file="reference/trees/chester_constraints.fa")
-```
-
-# Align fasttree using constriants tree
-```{bash fastree}
-module load FastTree
-FastTree -gtr -cat 20 -constraints constraints_depth5.fa -nt merged_final_nogaps.fa > constraint_depth5_FastTree.nwk
-
-FastTree -gtr -cat 20 -constraints constraints_depth6.fa -nt merged_final_nogaps.fa > constraint_depth6_FastTree.nwk
-
-FastTree -gtr -cat 20 -constraints constraints_fulltree.fa -nt merged_final_nogaps.fa > constraint_fulltree_FastTree.nwk
-```
-
-# Plot trees
-
-```{r}
-tree1 <- read.tree("reference/trees/constraint_depth5_FastTree.nwk")
-
-ggtree(tree1)
-
-```
-
-
-# Make ultrametric & Date
-```{r PATHd8}
-tree <- read.tree("reference/trees/constraint_depth5_FastTree.nwk")
-
-# Get species names
-seqs <- insect::readFASTA("reference/merged_final.fa.gz")
-
-names <- names(seqs) %>%
-  str_split_fixed(";", n=8) %>%
-  as_tibble() %>%
-  tidyr::separate(V1, into=c("acc", "taxid"), sep="\\|") %>%
-  mutate(acc = acc %>%stringr::str_replace_all("\\,|\\;|\\:|\\(|\\)|\\[|\\]", 
-        "_"))
-
-
-# Set names back to species
-tree$tip.label <- tree$tip.label %>% 
-  enframe() %>% 
-  dplyr::rename(acc = value) %>%
-  left_join(names) %>%
-  mutate(spp = V8 %>% str_replace_all(" ", "_")) %>%
-  pull(spp)
-
-
-# Date usign congruify
-ref_tree <- read.tree("reference/trees/chesters_2017_species_level_tree.nwk")
-
-table(tree$tip.label %in% ref_tree$tip.label)
-#38520 congruent tips
-
-library(geiger)
-res <- congruify.phylo(reference=ref_tree, target=tree, scale="PATHd8")
-write.tree(res$phy, "reference/ultrametric_insecta_tree_depth5.nwk")
-
-subtreeing = castor::get_subtree_with_tips(ref_tree, only_tips=tree$tip.label)
-subtree = subtreeing$subtree
-
-# map subset of target tips to reference tips
-mapping = matrix(c(subtreeing$new2old_tip,(1:Ntip(subtree))), ncol=2, byrow=FALSE)
-
-congruification <- congruent_divergence_times(reference_tree=ref_tree, target_tree=tree, mapping)
-
-pathd8(tree, exec = "~/PATHd8", seql, calibration)
-
-cat("Concordant target nodes:\n")
-print(congruification$target_nodes)
-cat("Ages of concordant nodes:\n")
-print(congruification$ages)
-
-
-# Alternatively, castor has - congruent_divergence_times
-
-# Rooting with castor?
-#find_root
-
-# Check tree
-tree <- read.tree("reference/ultrametric_insecta_tree.nwk")
-
-```
 
 # Evaluate LCA
 

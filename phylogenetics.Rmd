@@ -1,0 +1,407 @@
+---
+title: "phylogenetics"
+output: html_document
+---
+
+# Setup & Packages 
+
+```{r setup}
+# Knitr global setup - change eval to true to run code
+library(knitr)
+knitr::opts_chunk$set(echo = TRUE, eval=FALSE, message=FALSE,error=FALSE,fig.show = "hold", fig.keep = "all")
+
+#Set required packages
+.cran_packages <- c("tidyverse",
+                    "insect",
+                    "ape",
+                    "RColorBrewer",
+                    "seqinr",
+                    "patchwork",
+                    "geiger",
+                    "castor",
+                    "phytools")
+
+.bioc_packages <- c("DECIPHER",
+                    "ggtree",
+                    "Biostrings")
+
+.inst <- .cran_packages %in% installed.packages()
+if(any(!.inst)) {
+   install.packages(.cran_packages[!.inst])
+}
+.inst <- .bioc_packages %in% installed.packages()
+if(any(!.inst)) {
+  if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+  BiocManager::install(.bioc_packages[!.inst], ask = F)
+}
+
+#Load all packages
+sapply(c(.cran_packages,.bioc_packages), require, character.only = TRUE)
+
+# Github packages
+devtools::install_github("alexpiper/taxreturn")
+library(taxreturn)
+
+# SOurce internal functions
+source("R/helper_functions.R")
+source("R/themes.R")
+```
+
+# Create tree with fasttree for phylogenetic classification
+
+# Get diplura outgroup
+
+```{r outgroups}
+## Fetch mitochondrial genomes from genbank
+fetchSeqs("Diplura", database="genbank", out.dir="reference/outgroups", quiet=FALSE, marker="mitochondria", output = "gb-binom", compress=TRUE, multithread=FALSE, force=TRUE)
+
+#outgroup
+outgroup <- insect::readFASTA("reference/outgroups/Diplura_mitochondria.fa.gz")
+
+model <- readRDS("reference/folmer_fullength_model.rds")
+
+outgroups_aligned <- taxreturn::map_to_model(outgroup,  model, minscore = 100,
+ shave=TRUE, check_indels=TRUE,  maxNs = 0,
+ multithread=1, quiet=FALSE, progress = FALSE)
+
+
+# Map into OTT taxonomy 
+
+db <- taxreturn::get_ott_taxonomy(dir="ott3.2")
+outgroups_aligned <- map_to_ott(outgroups_aligned, db, resolve_synonyms=TRUE, dir="ott3.2", filter_unplaced=TRUE, remove_na = TRUE, quiet=FALSE)
+outgroups_aligned <- reformat_hierarchy(outgroups_aligned, db, ranks=c("kingdom", "phylum", "class", "order", "family", "genus", "species"), quiet=FALSE)
+
+names(outgroups_aligned) <- names(outgroups_aligned) %>% str_replace_all(";NA;", ";Hexapoda;")
+
+writeFASTA(outgroups_aligned, "reference/outgroups/Diplura_mitochondria.fa.gz")
+
+```
+
+# Constrain by taxonomy
+
+
+follow this paper https://pages.uoregon.edu/slouca/LoucaLab/SECTION_Publications/MODULE_Publications/Files/Louca2018GCN.pdf
+```{r Make tree constraints}
+seqs  <- insect::readFASTA("reference/merged_final.fa.gz")
+
+# Add an outgroup
+outgroup <- insect::readFASTA("reference/outgroups/Diplura_mitochondria.fa.gz")
+
+pruned <- filter_by_tax(seqs, filtrank = "Class", filtvalue = "Insecta")
+pruned <- c(outgroup,pruned)
+
+# Convert accessions to hexadecimal to ensure newick compatability
+pruned <- acc2hex(pruned)
+
+# Remove nucleotide positions with > 95% gaps 
+nogaps <- as.list(ape::del.colgapsonly(as.matrix(pruned), threshold=0.95))
+
+# Create tree at the order level and Force multifurcations to bifurications 
+tree_order <- taxreturn::tax2phylo(nogaps, depth="order", resolve_poly="upper" )
+
+# Extract fasttree constraints from tree
+constraints <- castor::extract_fasttree_constraints(tree_order)$constraints
+
+# Write out constraints as fasta file
+file.remove("reference/trees/constraints_order_bifurcating.fa")
+Ntips <- length(tree_order$tip.label)
+cat(paste(sapply(1:Ntips, #Ntips
+    FUN=function(tip) sprintf(">%s\n%s\n",tree_order$tip.label[tip],
+    paste(as.character(constraints[tip,]),collapse=""))),collapse=""), file="reference/trees/constraints_order_bifurcating.fa")
+
+# Write out an alignment with just accessions to match constraints
+out <- nogaps
+names(out) <- names(out) %>%
+  str_remove("\\|.*$") 
+  # Write out pruned for tree
+insect::writeFASTA(out, "reference/trees/merged_final_nogaps.fa", compress = FALSE)
+
+
+# Check names are hexed acc | genus.species
+
+###### OLD
+
+
+
+# Constrain entire tree to taxonomy
+tree <- tax2tree(nogaps, output="phylo", replace_bads = TRUE)
+
+# extract tree constraints from taxonomy
+constraints <- castor::extract_fasttree_constraints(tree)$constraints
+
+# Write out constraints as fasta file
+file.remove("reference/trees/constraints_fulltree.fa")
+Ntips <- length(tree$tip.label)
+cat(paste(sapply(1:Ntips, #Ntips
+    FUN=function(tip) sprintf(">%s\n%s\n",tree$tip.label[tip],
+    paste(as.character(constraints[tip,]),collapse=""))),collapse=""), file="reference/trees/constraints_fulltree.fa")
+
+# Constrain at the order level 
+# NOTE - Do depth 1 below the level you wish to constrain at
+tree_order <- tax2tree(nogaps, depth=5, output="phylo", replace_bads = TRUE)
+
+find_root(tree_order)
+
+# extract tree constraints from taxonomy
+constraints <- castor::extract_fasttree_constraints(tree_order)$constraints
+
+# Write out constraints as fasta file
+file.remove("reference/trees/constraints_depth5.fa")
+Ntips <- length(tree_order$tip.label)
+cat(paste(sapply(1:Ntips, #Ntips
+    FUN=function(tip) sprintf(">%s\n%s\n",tree_order$tip.label[tip],
+    paste(as.character(constraints[tip,]),collapse=""))),collapse=""), file="reference/trees/constraints_depth5.fa")
+	
+
+# Get constraints at the family level
+tree_fam <- tax2tree(nogaps, depth=6, output="phylo", replace_bads = TRUE)
+
+# extract tree constraints from taxonomy
+constraints <- castor::extract_fasttree_constraints(tree_fam)$constraints
+
+# Write out constraints as fasta file
+file.remove("reference/trees/constraints_depth6.fa")
+Ntips <- length(tree_fam$tip.label)
+cat(paste(sapply(1:Ntips, #Ntips
+    FUN=function(tip) sprintf(">%s\n%s\n",tree_fam$tip.label[tip],
+    paste(as.character(constraints[tip,]),collapse=""))),collapse=""), file="reference/trees/constraints_depth6.fa")
+
+
+# Write out an alignment with just accessions to match constraints
+out <- nogaps
+names(out) <- names(out) %>%
+  str_remove("\\|.*$") 
+  # Write out pruned for tree
+insect::writeFASTA(out, "reference/trees/merged_final_nogaps.fa", compress = FALSE)
+```
+
+
+Get tree of Chesters et al 2017
+
+```{r}
+dir.create("reference/trees")
+# Get trees
+httr::GET("https://datadryad.org/stash/downloads/file_stream/93335",
+          httr::write_disk("reference/trees/chesters_2017_species_level_tree.nwk", overwrite = TRUE))
+
+# Read in reference tree
+tree <- read.tree("reference/trees/chesters_2017_species_level_tree.nwk")
+
+Ntip(tree)
+
+ggtree(tree, ladderize = FALSE) + geom_tiplab() 
+#Need to translate the nameas!
+
+
+#Subset to species labels only to match reference tree
+chester_align <- nogaps
+
+name_vec <- names(chester_align) %>% 
+  str_remove(";$") %>% 
+  str_split_fixed(";", n = 8)
+
+names(chester_align) <- name_vec[,8] %>%
+  str_replace_all(" ", "_")
+
+chester_align <- chester_align[!duplicated(names(chester_align))]
+insect::writeFASTA(chester_align, "reference/merged_final_chester_align.fa.gz", compress = TRUE)
+
+# Get shared tips between two trees
+shared <- intersect(names(chester_align), tree$tip.label)
+length(shared)
+#38520 shared tips
+
+# Drop unshared tips from reference tree
+tree2 <- drop.tip(tree, tree$tip.label[!tree$tip.label %in% shared])
+
+# extract tree constraints
+constraints <- castor::extract_fasttree_constraints(tree2)$constraints
+
+# Write out constraints as fasta file
+Ntips <- length(tree2$tip.label)
+cat(paste(sapply(1:Ntips, #Ntips
+    FUN=function(tip) sprintf(">%s\n%s\n",tree2$tip.label[tip],
+    paste(as.character(constraints[tip,]),collapse=""))),collapse=""), file="reference/trees/chester_constraints.fa")
+```
+
+# Align fasttree using constriants tree
+```{bash fastree}
+module load FastTree
+
+FastTree -gtr -cat 20 -constraints constraints_order_bifurcating.fa -nt merged_final_nogaps.fa > constraint_order_bifurcating.nwk
+
+FastTree -gtr -cat 20 -nt merged_final_nogaps.fa > unconstrained.nwk
+
+FastTree -gtr -cat 20 -constraints constraints_depth6.fa -nt merged_final_nogaps.fa > constraint_depth6_FastTree.nwk
+FastTree -gtr -cat 20 -constraints constraints_fulltree.fa -nt merged_final_nogaps.fa > constraint_fulltree_FastTree.nwk
+```
+
+
+# Make ultrametric & Date
+```{r PATHd8}
+tree <- read.tree("reference/trees/constraint_order_bifurcating.nwk")
+
+Ntips 	<- length(tree$tip.label)
+Nnodes 	<- tree$Nnode
+cat(sprintf("Tree has %d nodes, %d tips and %d edges\n",Nnodes,Ntips,nrow(tree$edge)));
+
+# Get species names
+seqs <- insect::readFASTA("reference/merged_final.fa.gz")
+outgroup <- insect::readFASTA("reference/outgroups/Diplura_mitochondria.fa.gz")
+
+seqs <- c(outgroup,seqs)
+
+seqs <- acc2hex(seqs)
+names <- names(seqs) %>%
+  str_split_fixed(pattern="\\|", n = 2) %>%
+  as_tibble() %>%
+  separate(V2, into=c("taxid","kingdom", "phylum", 
+    "class", "order", "family", "genus", "species"), sep=";") %>%
+  dplyr::rename(acc = V1)%>%
+  mutate(species = species %>% str_replace_all(" ", "_")) %>%
+  mutate(tips = paste0(acc, "|", species))
+
+# Reroot on diplura outgroup
+outgroups <- names %>% 
+  filter(order == "Diplura") %>%
+  filter(acc %in% tree$tip.label) %>%
+  pull(acc)
+
+# Reroot tree on Archaeognatha
+#outgroups <- names %>% 
+#  filter(order == "Archaeognatha") %>%
+#  filter(acc %in% tree$tip.label) %>%
+#  pull(acc)
+
+library(castor)
+newroot <- get_mrca_of_set(tree, outgroups)
+
+tree <- root_at_node(tree, newroot-Ntips)
+cat(sprintf("New root is %d\n",find_root(tree)))
+
+# Set names back to species
+lineage <- tree$tip.label %>% 
+  enframe() %>% 
+  dplyr::rename(acc = value) %>%
+  dplyr::select(-name) %>%
+  left_join(names, by="acc") 
+
+tree$tip.label <- lineage$tips
+
+# create internal node labels
+tree$node.label <- NA
+if(is.na(tree$node.label)){
+	cat(sprintf("Adding node labels to full tree..\n"))
+	tree$node.label = paste("node.", 1:Nnodes, sep = "") # don't use underscores, because some tree readers (e.g. rncl) interpret them as spaces
+}
+
+# replace zero-length edges
+if(any(tree$edge.length==0)){
+  epsilon = 0.1*min(tree$edge.length[tree$edge.length>0])
+	cat(sprintf("Note: Some edges have length zero, which may break some of the HSP routines. Replacing zero-lengths with a tiny positive length (%g)..\n",epsilon))
+	tree$edge.length[tree$edge.length==0] = epsilon
+}
+
+taxtab <- lineage %>%
+  dplyr::select(tips, genus, family, order) %>%
+  tibble::column_to_rownames("tips") %>%
+  as.matrix()
+
+# Date usign congruify
+ref_tree <- read.tree("reference/trees/chesters_2017_species_level_tree_ultrametric.nwk")
+ref_tree$node.label <- NA
+ref_tree$node.label = paste("node.", 1:Nnodes, sep = "") # don't use underscores, because some tree readers (e.g. rncl) interpret them as spaces
+table(ref_tree$tip.label %in% (tree$tip.label%>% str_remove("^.*\\|")))
+#38520 congruent tips
+
+# prune ref_tree to only congruent tips
+ref_tree_pruned <- drop.tip(ref_tree, ref_tree$tip.label[!ref_tree$tip.label %in% (tree$tip.label%>% str_remove("^.*\\|"))])
+
+table(ref_tree_pruned$tip.label %in% (tree$tip.label%>% str_remove("^.*\\|")))
+
+
+# Prune duplicate genera
+ref_tree_pruned2 <- drop.tip(ref_tree_pruned, ref_tree_pruned$tip.label[duplicated(ref_tree_pruned$tip.label %>%
+  str_remove("_.*$"))])
+
+#Adjust to genus
+ref_tree_pruned2$tip.label <- ref_tree_pruned2$tip.label %>%
+  str_remove("_.*$")
+
+
+res <- congruify.phylo(reference=ref_tree_pruned2, target=tree,taxonomy = taxtab, scale="PATHd8")
+
+write.tree(res$phy, "ultrametric_insecta_tree_order_constrained.nwk")
+
+
+#### CASTOR ALTERNATIVE
+tree <- read.tree("reference/trees/constraint_depth5_FastTree.nwk")
+
+# Root on Archaeognatha
+tree <- root_via_outgroup(tree, outgroup="4b4a363931313131", update_indices = TRUE)
+
+Ntips 	<- length(tree$tip.label)
+Nnodes 	<- tree$Nnode
+cat(sprintf("Tree has %d nodes, %d tips and %d edges\n",Nnodes,Ntips,nrow(tree$edge)));
+
+# Get species names
+seqs <- insect::readFASTA("reference/merged_final.fa.gz")
+
+seqs <- acc2hex(seqs)
+names <- names(seqs) %>%
+  str_split_fixed(pattern="\\|", n = 2) %>%
+  as_tibble() %>%
+  separate(V2, into=c("taxid","kingdom", "phylum", 
+    "class", "order", "family", "genus", "species"), sep=";") %>%
+  dplyr::rename(acc = V1)%>%
+  mutate(species = species %>% str_replace_all(" ", "_")) %>%
+  mutate(tips = paste0(acc, "|", species))
+
+# Set names back to species
+lineage <- tree$tip.label %>% 
+  enframe() %>% 
+  dplyr::rename(acc = value) %>%
+  dplyr::select(-name) %>%
+  left_join(names, by="acc") 
+
+tree$tip.label <- lineage$tips
+
+# Date usign congruify
+ref_tree <- read.tree("reference/trees/chesters_2017_species_level_tree_ultrametric.nwk")
+ref_tree$node.label <- NA
+ref_tree$node.label = paste("node.", 1:Nnodes, sep = "") 
+
+table(ref_tree$tip.label %in% (tree$tip.label%>% str_remove("^.*\\|")))
+
+# prune ref_tree to only congruent tips
+ref_tree_pruned <- drop.tip(ref_tree, ref_tree$tip.label[!ref_tree$tip.label %in% (tree$tip.label%>% str_remove("^.*\\|"))])
+
+table(ref_tree_pruned$tip.label %in% (tree$tip.label%>% str_remove("^.*\\|")))
+
+# map target tips to reference tips
+mapping <- tree$tip.label %>% str_remove("^.*\\|")
+names(mapping) <- tree$tip.label
+
+mapping <- mapping[mapping %in% ref_tree_pruned$tip.label]
+
+congruification <- congruent_divergence_times(reference_tree=ref_tree, target_tree=tree, mapping)
+
+library(ips)
+pathd8(tree, exec = "~/PATHd8", seql, calibration)
+
+cat("Concordant target nodes:\n")
+print(congruification$target_nodes)
+cat("Ages of concordant nodes:\n")
+print(congruification$ages)
+
+
+# Alternatively, castor has - congruent_divergence_times
+
+# Rooting with castor?
+#find_root
+
+# Check tree
+tree <- read.tree("reference/ultrametric_insecta_tree.nwk")
+
+```

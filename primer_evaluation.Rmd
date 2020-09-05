@@ -683,39 +683,74 @@ write_csv(summaries, "primer_evaluation/mismatch_summary.csv")
 R.utils::gzip("primer_evaluation/mismatch_summary.csv")
 
 summaries <- vroom::vroom("primer_evaluation/mismatch_summary.csv.gz", delim = ",") %>%
-  dplyr::select(-dir)
+  dplyr::select(-dir) %>%
+  mutate(primer = primer %>% str_remove(".gz$")) %>%
+  left_join(primers %>%
+            dplyr::select(primer = name, strand))
 
 # Arrange on tree
-library(castor)
-tree <- ape::read.tree("reference/")
+tree <- ape::read.tree("reference/trees/ultrametric_insecta_tree_fulltree.nwk")
+
+# Filter summaries to just those in tree
+summaries <- summaries %>% 
+  dplyr::filter(Genus %in% (tree$tip.label %>% 
+  str_remove("^.*\\|") %>%
+  str_extract("^.+?(?=_)") %>%
+    unique()))
+
+# get Lineage
+seqs <- insect::readFASTA("reference/merged_final.fa.gz")
+
+seqs <- acc2hex(seqs)
+
+lineage <- names(seqs) %>%
+  str_split_fixed(pattern="\\|", n = 2) %>%
+  as_tibble() %>%
+  separate(V2, into=c("taxid","Kingdom", "Phylum", 
+    "Class", "Order", "Family", "Genus", "Species"), sep=";") %>%
+  dplyr::rename(acc = V1)%>%
+  mutate(Species = Species %>% str_replace_all(" ", "_")) %>%
+  dplyr::select(-Species)
 
 # Prune tree to genus
-tips_to_keep <- dat %>%
-  dplyr::select(Kingdom, Phylum, Class, Order, Family, Genus, Species) %>%
-  dplyr::filter(!duplicated(Species)) %>%
-  dplyr::filter(Class=="Insecta") %>%
+tips_to_keep <- tree$tip.label %>% 
+  enframe() %>% 
+  tidyr::separate(value, into=c("acc", "Species"), sep="\\|") %>%
+  left_join(lineage, by="acc") %>%
   filter(Genus %in% (summaries %>% pull(Genus))) %>%
   group_by(Genus) %>%
   dplyr::slice(1) %>%
   ungroup() %>%
-  mutate(name_check = case_when(
-    str_extract(Species, "^.+?(?=_)") == Genus ~ TRUE,
-    !str_extract(Species, "^.+?(?=_)") == Genus ~ FALSE
-  )) %>%
-  filter(name_check) %>%
-  dplyr::select(-name_check)
+  mutate(tips = paste0(acc,"|", Species))
 
+
+#Get subtree of only genera
 tree  <- castor::get_subtree_with_tips(tree,
-                                          omit_tips=setdiff(tree$tip.label, tips_to_keep$Species),
+                                          only_tips = tips_to_keep$tips,
                                           collapse_monofurcations=TRUE,
                                           force_keep_root=TRUE)$subtree
 
 #Prune names to genus
-tree$tip.label <- tree$tip.label %>% str_extract("^.+?(?=_)")
+tree$tip.label <- tree$tip.label %>% 
+  str_remove("^.*\\|") %>%
+  str_extract("^.+?(?=_)")
+
+#Prune again to ensure matching tips
+tree <- castor::get_subtree_with_tips(tree,
+                                          only_tips = tree$tip.label[tree$tip.label %in% summaries$Genus],
+                                          collapse_monofurcations=TRUE,
+                                          force_keep_root=TRUE)$subtree
 
 Ntips 	<- length(tree$tip.label)
 Nnodes 	<- tree$Nnode
 cat(sprintf("Tree has %d nodes, %d tips and %d edges\n",Nnodes,Ntips,nrow(tree$edge)));
+
+# Root on Archaeognatha
+#tips_to_keep %>%
+#  filter(Order == "Archaeognatha" ) %>%
+#  filter(Genus == "Machilis") %>%
+#  pull(tips)
+#tree <- root_via_outgroup(tree, outgroup="Machilis", update_indices = TRUE)
 
 # create internal node labels
 tree$node.label <- NA
@@ -745,6 +780,10 @@ for (i in 1:length(uprimers)){
     column_to_rownames("Genus")
     
   row2tip <- match(rownames(tip_states), tree$tip.label)
+  
+  #find non matching
+  rownames(tip_states)[is.na(row2tip)]
+  
   tip_states <- tip_states[!is.na(row2tip),,drop = FALSE]
   hsp_states <- castor::hsp_independent_contrasts(tree = tree,
                                               tip_states = tip_states$values,
@@ -784,9 +823,11 @@ set_names(group_name$group_name)
 
 tree2 <- groupOTU(tree, cls)
 
+tree2 <-tree
 # Plot tree
-p1 <- ggtree(tree2, ladderize=TRUE, aes(colour=values)) +
-  geom_text2(aes(subset=!isTip, label=group %>% na_if(0)), hjust=0, check_overlap=TRUE)
+
+p1 <- ggtree(tree2, ladderize=TRUE, aes(colour=values))# + #,layout = "circular"
+  #geom_text2(aes(subset=!isTip, label=group %>% na_if(0)), hjust=0, check_overlap=TRUE)
 
 weights_p1 <- p1$data %>%
   left_join(imputed %>%
@@ -806,32 +847,83 @@ names(tip_states) <- weights_p1 %>%
 weights_p1$values[!weights_p1$isTip] <- castor::asr_independent_contrasts(tree=tree,
                                                         tip_states=tip_states)$ancestral_states
 
-p2 <- p1 %<+% weights_p1 + geom_tippoint(aes(colour=values)) +
+p2 <- p1 %<+% weights_p1 +
+  #geom_tippoint(aes(colour=values)) +
   scale_color_gradient(low="darkslateblue", high="firebrick") +
   theme(legend.position = "none") + 
   scale_y_continuous(expand=c(0,0))+ 
   scale_x_discrete(expand=c(0,0)) 
 
 ## make a clade label list
-#tax_groups <- tips_to_keep %>%
-#  dplyr::rename(label = Genus) %>%
-#  select(label, Order) %>%
-#  filter(label %in% tree$tip.label) %>%
-#  group_by(Order) 
-#
-#group_name <- group_keys(tax_groups)  %>%
-#  mutate(group_name = Order %>% str_remove_all("\\[|\\]"))
-#
-#cls <- tax_groups %>% 
-#  group_split() %>% 
-#  purrr::map(pull, label) %>%
-#  set_names(group_name$group_name) %>%
-#  purrr::map(get_mrca_of_set, tree=tree)
-#
-#p3 <- p2
-#for(i in 1:length(cls)){
-#p3 <- p3 + geom_cladelabel(node=cls[[i]], label=names(cls[i]), align=T, angle=270, hjust='center', #offset.text=.5, barsize=1.5)
-#}
+tax_groups <- tips_to_keep %>%
+  dplyr::rename(label = Genus) %>%
+  select(label, Order) %>%
+  filter(label %in% tree$tip.label) %>%
+  group_by(Order) 
+
+group_name <- group_keys(tax_groups)  %>%
+  mutate(group_name = Order %>% str_remove_all("\\[|\\]"))
+
+test <- tax_groups %>% 
+  group_split() %>% 
+  purrr::map(pull, label) %>%
+  set_names(group_name$group_name) 
+x <- test[[11]]
+
+cls <- tax_groups %>% 
+  group_split() %>% 
+  purrr::map(pull, label) %>%
+  set_names(group_name$group_name) %>%
+  purrr::map(function(x){
+    query <- x
+    labs <-  p2$data %>%
+      dplyr::filter(label %in% query)
+    quants <- labs  %>% 
+      dplyr::filter(between(y, left=quantile(labs$y,  probs =0.1), right=quantile(labs$y,  probs =0.90)))
+    mrca_node <- get_mrca_of_set(tree, quants$label)
+    
+    if(mrca_node > Ntips){
+      subset_node <- mrca_node-Ntips
+    } else{
+      subset_node <- mrca_node
+    }
+    subset_tree <- get_subtree_at_node(tree, subset_node)$subtree
+    print(length(subset_tree$tip.label))
+    return(mrca_node)
+  })
+
+test <- tax_groups %>%
+  ungroup() %>%
+  dplyr::filter(Order == "Zygentoma") %>%
+  mutate(genus.y = label, genus.x = label) %>%
+  tidyr::expand(genus.y, genus.x) %>%
+  dplyr::filter(!genus.x == genus.y)
+test2 <- get_pairwise_mrcas(tree = tree, A = test$genus.x, B=test$genus.y)
+mode_node <- tail(names(sort(table(test2))), 5)
+
+p3 <- p2
+p3 <- p3 + geom_cladelabel(node=mode_node[1], label="Lepidoptera", align=T, angle=270, hjust='center', offset.text=.5, barsize=1.5)
+p3
+
+
+
+
+# colours 
+colourCount = length(cls)
+getPalette = colorRampPalette(brewer.pal(12, "Paired"))
+colour.pal <- getPalette(colourCount)
+
+# clade label offset
+offsets <- seq(0, length(cls), .5)
+
+i=9
+p3 <- p2
+for(i in 1:length(cls)){
+p3 <- p3 + geom_cladelabel(node=cls[[i]], label=names(cls[i]), align=T, angle=270, hjust='center', offset.text=.25, barsize=1.5, color = colour.pal[[i]])
+}
+
+p3
+
 # Plot heatmap
 gg.mismatch <- imputed %>%
   left_join(p2$data %>% dplyr::select(label, y) %>% dplyr::rename(Genus = label)) %>%
@@ -840,7 +932,7 @@ gg.mismatch <- imputed %>%
     geom_raster() +
     #scale_fill_distiller(palette = "Spectral", limits = c(0, 200)) +
     scale_fill_gradient(low = "darkslateblue", high = "firebrick", na.value = "grey", limits = c(0, 200), oob = scales::squish) +
-    facet_grid(~dir, scales="free", space="free", drop=TRUE) +
+    facet_grid(~strand, scales="free", space="free", drop=TRUE) +
     #theme_classic() + 
     theme(
       axis.text.x = element_text(angle = 45, hjust = 1),
@@ -877,8 +969,6 @@ pdf(file="fig/Fig3.pdf", width = 8, height = 11 , paper="a4")
   plot(Fig3)
 try(dev.off(), silent=TRUE)
  
-
-  
 #- Add a summary metric for mean mismatch for each primer
 #- Add a summary metric for evennes of mismatch for each primer
 #- Add a summary metric for amount of missing data imputed. Is there a way to highlight what data was imputed or not?
@@ -1189,7 +1279,7 @@ The phylogenetic autocorrelation function (ACF) of known 16S GCNs across the SIL
 ```{r ID success on tree}
 # Arrange on tree
 library(castor)
-tree <- rncl::read_newick_phylo("reference/ultrametric_insecta_tree.nwk")
+tree <- rncl::read_newick_phylo("reference/trees/ultrametric_insecta_tree_depth5.nwk")
 
 # Prune tree to genus
 tips_to_keep <- dat %>%
