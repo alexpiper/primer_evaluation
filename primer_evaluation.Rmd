@@ -599,9 +599,492 @@ gg.density
 
 ```
 
+# Identification sucess
+
+In order to evaluate the taxonomic resolution of different barcode regions, alignments were trimmed to primer regions using the in silico PCR function from the insect package and  the identificaiton sucess functions from the SPIDER r package were used
+
+Metrics to evaluate primers on:
+ *  OTU clustering of each primer at different ranks, see drop off
+ *  OTU clustering, subset to pests only (ie fraction of pests in their own cluster)
+ *  Datasets subset to pest genera (or families), evaluated with spider nearNeighbour, BestCloseMatch, ThreshID, Monophyly
+ * Leave one out BLAST/RDP?
+ * P(LCR) for each primer?
+ 
+ 
+## Virtual PCR
+
+```{r Virtual PCR}
+# Load seqs
+seqs <- readDNAStringSet("reference/merged_final.fa.gz")
+seqs <- seqs[lengths(seqs)==712]
+
+# Load primers
+primers <- read_csv("primer_evaluation/primer_candidates.csv") %>%
+  mutate(seq = str_replace_all(seq, "I","N")) %>% 
+  select(-score, -issues)
+
+# Get all possible primer combinations
+combos <- expand_grid(primers %>% filter(strand=="F") %>% pull(seq),
+                      primers %>% filter(strand=="R") %>% pull(seq)
+                      ) %>%
+  mutate_if(is.factor, as.character)%>%
+  unique() %>%
+  magrittr::set_colnames(c("Fseq", "Rseq")) %>%
+  left_join(primers %>% filter(strand=="F") %>% rename_all(. %>% paste0("F",.)), by="Fseq") %>%
+  left_join(primers %>% filter(strand=="R") %>% rename_all(. %>% paste0("R",.)), by="Rseq") %>%
+  mutate(amplicon = Rstart - Fend) %>%
+  filter(amplicon > 50)
+
+dir.create("primer_evaluation/amplicons")
+
+# Setup multithreading
+library(foreach)
+library(doParallel)
+cores=12
+cl <- parallel::makeCluster(cores)
+registerDoParallel(cl)
+
+li <- foreach(p=1:nrow(combos)) %dopar% {
+  #get primer names
+  primernames <- paste0(combos$Fname[p], "_",  combos$Rname[p])
+  
+  # cut down alignments
+  amplicon <- Biostrings::subseq(seqs, start=combos$Fend[p]+1, end = combos$Rstart[p]) #may need to add 1 to start
+  
+  if (any(!lengths(amplicon)== combos$amplicon[p])){
+    warning(paste0("Amplicons of ",primernames, " are not the same length"))
+  }
+  
+  maxgaps <- 9 # dont allow any more than 9 gaps
+  rem <- names(amplicon)[Biostrings::letterFrequency(amplicon, "-") > maxgaps]
+  amplicon <- amplicon[!names(amplicon) %in% rem]
+  message(paste0(length(rem), " Sequences with more than ", maxgaps, " gaps removed from ", primernames))
+  
+  #write out sequences
+  Biostrings::writeXStringSet(amplicon, file=paste0("primer_evaluation/amplicons/", primernames,".fa.gz"), compress=TRUE)
+}
+#close cluster
+parallel::stopCluster(cl)
+
+```
+ 
+### USEARCH distance matrix
+
+```{bash generate job index}
+#!/bin/bash
+dos2unix bash/usearch_distmat.sh
+/usr/bin/ls -d /group/pathogens/Alexp/Metabarcoding/primer_evaluation/primer_evaluation/amplicons/* | sed -e '1p' -e '/.fa.gz/!d' | sort -u > job_index.txt
+njobs=$(cat job_index.txt | wc -l)
+sbatch --array=1-$njobs bash/usearch_distmat.sh
+```
+
+## Figure 4 - ID success
+
+```{r analyse uclust}
+# Summarise number of mixed clusters that contain pests at %
+pestlist <- read_csv("primer_evaluation/pestlist.csv") 
+
+# Load primers
+primers <- read_csv("primer_evaluation/primer_candidates.csv") %>%
+  mutate(seq = str_replace_all(seq, "I","N"))  %>%
+  distinct()
+
+# Get all possible primer combinations
+combos <- expand_grid(primers %>% filter(strand=="F") %>% pull(seq),
+                      primers %>% filter(strand=="R") %>% pull(seq)
+                      ) %>%
+  mutate_if(is.factor, as.character)%>%
+  unique() %>%
+  magrittr::set_colnames(c("Fseq", "Rseq")) %>%
+  left_join(primers %>% filter(strand=="F") %>% rename_all(. %>% paste0("F",.)), by="Fseq") %>%
+  left_join(primers %>% filter(strand=="R") %>% rename_all(. %>% paste0("R",.)), by="Rseq") %>%
+  mutate(amplicon = Rstart - Fend) %>%
+  filter( amplicon > 100)
+
+# Check missing
+complete <- list.files(path="primer_evaluation/amplicons/usearch_output/", pattern = ".txt.gz") %>%
+  basename %>%
+  str_remove(".txt.gz")
+
+setdiff(paste0(combos$Fname, "_",  combos$Rname), complete)
+setdiff(complete,paste0(combos$Fname, "_",  combos$Rname))
+
+
+# Get mixed clusters
+library(furrr)
+plan(multiprocess, workers=4)
+mixed_clusters <- fs::dir_ls(path="primer_evaluation/amplicons/usearch_output/", glob = "*.txt.gz")%>%
+  furrr::future_map(function(x){
+  #purrr::map(function(x){
+  df <- vroom::vroom(x, delim="\t", col_names = c("acc1", "acc2", "dist")) %>%
+    dplyr::mutate(spp1 = acc1 %>%
+                    str_remove(";$") %>%
+                    str_remove("^.*;"),
+                  acc1 = acc1 %>% str_remove(";.*$"),
+                  spp2 = acc2 %>%
+                    str_remove(";$") %>%
+                    str_remove("^.*;"),
+                  acc2 = acc2 %>% str_remove(";.*$"),
+                  dist = round(dist, 2)) %>%
+    dplyr::filter(!spp1==spp2)
+
+  all <- df %>%
+        dplyr::group_by(dist) %>% 
+        dplyr::summarise(mixed=n_distinct(spp1)) %>%
+        dplyr::mutate(type="all")
+  pests <- df %>%
+        dplyr::group_by(dist) %>% 
+        filter(spp1 %in% pestlist$Species) %>%
+        dplyr::summarise(mixed=n_distinct(spp1)) %>%
+        dplyr::mutate(type="pest")
+      out <- bind_rows(all, pests)
+      return(out)
+  
+  })%>%
+  bind_rows(.id="source") %>%
+  mutate(source = str_remove(basename(source), ".txt.gz"))
+  
+#Get amplified
+amplified <- fs::dir_ls(path="primer_evaluation/amplicons/", glob = "*.fa.gz") %>%
+   purrr::map(function(x){
+   #furrr::future_map(function(x){
+     df <- fasta.index(x) %>%
+        mutate(species = desc %>% 
+                 str_remove("(?:[^;]*;){7}") %>% #match 7th ;
+                 str_remove(";$")) # match last ;
+     all <- df %>%
+      dplyr::group_by(filepath) %>%
+      dplyr::summarise(seqs_amplified = n(), spp_amplified = n_distinct(species)) %>%
+      dplyr::mutate(type="all")
+     pests <- df %>%
+      dplyr::group_by(filepath) %>%
+      dplyr::filter(species %in% pestlist$Species) %>%
+      dplyr::summarise(seqs_amplified = n(), spp_amplified = n_distinct(species)) %>%
+      dplyr::mutate(type="pest")
+     out <- bind_rows(all, pests)
+    return(out)
+   }) %>%
+  bind_rows() %>%
+  mutate(source = str_remove(basename(filepath), ".fa.gz")) %>%
+  dplyr::select(-filepath)
+
+joint <- mixed_clusters %>%
+  left_join(amplified) %>%
+  mutate(combos = source) %>% 
+  tidyr::separate(source, into=c("Fname", "Rname"), sep="_", extra="merge")
+vroom::vroom_write(joint, "primer_evaluation/amplicons/mixed_clusters_summary.csv", delim=",")
+
+
+# Make figure
+
+# Count reads
+joint <- vroom::vroom("primer_evaluation/amplicons/mixed_clusters_summary.csv", delim=",") %>%
+  left_join(combos) %>% 
+  mutate(success =  (spp_amplified - mixed)/spp_amplified,
+         threshold = 1-dist) %>%
+  dplyr::select(Fname,Rname, dist, threshold,
+                mixed, type, seqs_amplified,
+                spp_amplified, amplicon, combos, success) 
+
+
+# Look at log ratio to the folmer region
+ref <- joint %>% 
+  dplyr::filter(Fname == "LCO1490"&  Rname=="HCO2198") %>% 
+              select(ref_success = success,
+                     dist, threshold, type) %>%
+  dplyr::filter(threshold %in% c(0.97,0.98,0.99, 1))%>%
+  group_by(type) %>%
+  summarise(ref_success = mean(ref_success)) %>%
+  ungroup()
+
+id_success <- joint %>% 
+  dplyr::filter(threshold %in% c(0.97,0.98,0.99, 1))%>%
+  group_by(Fname, Rname, type, combos, amplicon, threshold) %>%
+  summarise(success = mean(success)) %>%
+  ungroup() %>%
+  left_join(ref) %>%
+  mutate(success_alr = log(success/ref_success),
+         success_rat = success/ref_success,
+         highlight = case_when(
+           combos %in% c("fwhF2_fwhR2n", "fwhF2_HexCOIR4") ~ TRUE,
+           TRUE ~ FALSE
+         ))
+
+
+# Breakpoint regression
+model_dat <- id_success %>%
+  dplyr::select(combos, amplicon, threshold, success)
+
+breakpoint_fit <- model_dat %>% 
+  group_by(threshold) %>%
+  nest() %>%
+  mutate(fits = map(data, ~chngptm(formula.1=success~1, formula.2=~amplicon,
+                                   type="segmented", family="gaussian",data = .)),
+         summary = map(fits, summary),
+         preds = map2(fits, data, predict),
+         breakpoint = map(fits, "chngpt")
+    ) 
+
+dat_pred <- breakpoint_fit %>%
+  unnest(preds, data, breakpoint)%>%
+  select(-where(is.list))  %>%
+  drop_na()
+
+break_annot <- dat_pred %>% 
+                group_by(threshold) %>%
+                filter(amplicon == breakpoint) %>%
+                dplyr::slice(1)
+
+gg.id <- id_success %>%
+  ggplot(aes(x=amplicon, y=success, colour=success))+
+  geom_jitter(width = 5, height=0.01, alpha=0.5)+
+   geom_line(data=dat_pred[dat_pred$amplicon < dat_pred$breakpoint,],
+             aes(x=amplicon, y=preds),  color = 'red', inherit.aes = FALSE) +
+  geom_line(data=dat_pred[dat_pred$amplicon >= breakpoint,],
+            aes(x=amplicon, y=preds),  color = 'red', inherit.aes = FALSE) +
+  geom_point(data= break_annot, aes(x=amplicon, y=preds),  color = 'red', inherit.aes = FALSE) +
+  geom_text(data= break_annot, aes(x=amplicon, y=preds, label=paste0(breakpoint, "bp")),nudge_y = 0.1,  color = 'red', inherit.aes = FALSE) +
+  geom_vline(data=dat_pred, aes(xintercept = breakpoint), colour="black", linetype = "dashed") +
+  scale_colour_gradient(low ="firebrick", high ="darkslateblue", na.value = "grey") +
+  geom_hline(yintercept=0, colour="grey80")+
+  base_theme+
+  facet_grid(threshold~type) +
+  theme(legend.position = "none") + 
+  labs(x="Amplicon length",
+       y="Percentage identified") +
+  coord_cartesian(ylim=c(0.5,1))+
+  scale_y_continuous(labels = scales::percent) +
+  scale_x_continuous(labels=scales::unit_format(unit="bp"))+
+  theme(panel.grid.minor = element_blank())
+
+gg.id
+
+```
+
+## ID success on tree
+
+for this we will analyse just the LCO HCO data. Will need to take in the raw amplicons data
+
+Arrange this on the tree and see how much phylogenetic signal there is
+
+The phylogenetic autocorrelation function (ACF) of known 16S GCNs across the SILVA-derived tree (Fig. 1a) was calculated using the castor function get_trait_acf based on 108 tip pairs (options “Npairs=1e8, Nbins=100”), chosen randomly among tips with known GCN. The function get_trait_acf randomly picks OTU pairs on the tree, bins them into one of many intervals of phylogenetic distance, and calculates the Pearson autocorrelation between GCNs of the OTU pairs within each bin. Note that this analysis does not assume that GCNs scale linearly with phylogenetic distance. Instead, the ACF merely measures the statistical correlation between GCNs on distinct tips, conditional upon the tips being within a certain phylogenetic distance from each other.
+
+```{r ID success on tree}
+# Get mixed clusters for the LCO-HCO gene region
+folmer_id <- vroom::vroom("primer_evaluation/amplicons/usearch_output/LCO1490_HCO2198.txt.gz",
+                          delim="\t", col_names = c("acc1", "acc2", "dist")) %>%
+    dplyr::mutate(spp1 = acc1 %>%
+                    str_remove(";$") %>%
+                    str_remove("^.*;"),
+                  acc1 = acc1 %>% str_remove(";.*$"),
+                  spp2 = acc2 %>%
+                    str_remove(";$") %>%
+                    str_remove("^.*;"),
+                  acc2 = acc2 %>% str_remove(";.*$"),
+                  dist = round(dist, 2)) %>%
+    mutate(threshold = 1-dist) %>%
+    filter(threshold %in% c(0.97, 0.98,0.99,1)) %>%
+    dplyr::filter(!spp1==spp2)%>%
+    dplyr::group_by(threshold, spp1) %>% 
+    dplyr::summarise(mixed=n_distinct(spp2)) %>%
+    ungroup() %>%
+  mutate(spp1 = spp1 %>% str_replace_all(" ", "_")) %>%
+  mutate(Genus = spp1 %>% str_remove("_.*$")) %>%
+  group_by(Genus, threshold) %>%
+  dplyr::summarise(mixed=sum(mixed)) 
+  
+
+# Arrange on tree
+tree <- ape::read.tree("reference/trees/ultrametric_insecta_tree_order_constrained.nwk")
+
+# get Lineage for tree
+seqs <- insect::readFASTA("reference/merged_final.fa.gz")
+
+seqs <- acc2hex(seqs)
+
+lineage <- names(seqs) %>%
+  str_split_fixed(pattern="\\|", n = 2) %>%
+  as_tibble() %>%
+  separate(V2, into=c("taxid","Kingdom", "Phylum", 
+    "Class", "Order", "Family", "Genus", "Species"), sep=";") %>%
+  dplyr::rename(acc = V1)%>%
+  mutate(Species = Species %>% str_replace_all(" ", "_")) %>%
+  dplyr::select(-Species)
+
+# Prune tree to genus
+tips_to_keep <- tree$tip.label %>% 
+  enframe() %>% 
+  tidyr::separate(value, into=c("acc", "Species"), sep="\\|") %>%
+  left_join(lineage, by="acc") %>%
+  #filter(Genus %in% (folmer_id %>% pull(Genus))) %>%
+  group_by(Genus) %>%
+  dplyr::slice(1) %>%
+  ungroup() %>%
+  mutate(tips = paste0(acc,"|", Species))
+
+
+#Get subtree of only genera
+tree  <- castor::get_subtree_with_tips(tree,
+                                          only_tips = tips_to_keep$tips,
+                                          collapse_monofurcations=TRUE,
+                                          force_keep_root=TRUE)$subtree
+
+
+#Prune names to genus
+tree$tip.label <- tree$tip.label %>% 
+  str_remove("^.*\\|") %>%
+  str_extract("^.+?(?=_)")
+
+# Filter id sucess to just those in tree
+folmer_id <- folmer_id %>%
+  dplyr::filter(Genus %in%  tree$tip.label)
+
+Ntips 	<- length(tree$tip.label)
+Nnodes 	<- tree$Nnode
+cat(sprintf("Tree has %d nodes, %d tips and %d edges\n",Nnodes,Ntips,nrow(tree$edge)));
+
+# create internal node labels
+tree$node.label <- NA
+if(is.na(tree$node.label)){
+	cat(sprintf("Adding node labels to full tree..\n"))
+	tree$node.label = paste("node.", 1:Nnodes, sep = "") # don't use underscores, because some tree readers (e.g. rncl) interpret them as spaces
+}
+
+# replace zero-length edges
+if(any(tree$edge.length==0)){
+  epsilon = 0.1*min(tree$edge.length[tree$edge.length>0])
+	cat(sprintf("Note: Some edges have length zero, which may break some of the HSP routines. Replacing zero-lengths with a tiny positive length (%g)..\n",epsilon))
+	tree$edge.length[tree$edge.length==0] = epsilon
+}
+
+# Plot tree
+
+# Loop over all different dists
+thresholds <- unique(folmer_id$threshold)
+plotvec <- vector("list", length = length(thresholds))
+names(plotvec) <- thresholds
+
+acfvec <- vector("list", length = length(thresholds))
+names(acfvec) <- thresholds
+
+i=1
+for(i in 1:length(thresholds)){
+  
+  p1 <- ggtree(tree , ladderize=TRUE, aes(colour=values), layout = "circular") 
+  
+  weights_p1 <- p1$data %>%
+    left_join(folmer_id %>% 
+                filter(threshold == thresholds[i]) %>%
+                select(-threshold) %>%
+                dplyr::rename(label = Genus, values = mixed))%>%
+    mutate(values = values %>% replace_na(0))
+                
+      
+  tip_states <- weights_p1 %>%
+    dplyr::filter(isTip) %>%
+    pull(values)
+  names(tip_states) <- weights_p1 %>%
+    dplyr::filter(isTip) %>%
+    pull(label)
+  
+  weights_p1$values[!weights_p1$isTip] <- castor::asr_independent_contrasts(tree=tree,
+                                                          tip_states=tip_states, check_input = FALSE)$ancestral_states
+#
+  #weights_p1 <- weights_p1 %>%
+  #  mutate(highlight = case_when(
+  #    isTip & values > 0 ~ 5, #Set to max
+  #    TRUE ~ as.numeric(NA)
+  #  ))
+  #
+  p2 <- p1 %<+% weights_p1 +
+    scale_color_gradient(low="darkslateblue", high="firebrick",na.value = NA, limits = c(0,5), oob = scales::squish) +
+    #geom_tippoint(aes(colour=highlight), size=.5) +
+    theme(legend.position = "none") + 
+    scale_y_continuous(expand=c(0,0))+ 
+    scale_x_discrete(expand=c(0,0)) 
+  
+
+  ## make a clade label list
+  tax_groups <- tips_to_keep %>%
+    dplyr::rename(label = Genus) %>%
+    select(label, Order) %>%
+    filter(label %in% tree$tip.label) %>%
+    group_by(Order) 
+  
+  group_name <- group_keys(tax_groups)  %>%
+    mutate(group_name = Order %>% str_remove_all("\\[|\\]"))
+  
+  cls <- tax_groups %>% 
+    group_split() %>% 
+    purrr::map(pull, label) %>%
+    set_names(group_name$group_name) %>%
+    purrr::map(function(x){
+      query <- x
+      labs <-  p2$data %>%
+        dplyr::filter(label %in% query)
+      quants <- labs  %>% 
+        dplyr::filter(between(y, left=quantile(labs$y,  probs =0.1), right=quantile(labs$y,  probs =0.90)))
+      
+      if(length(quants$label) > 1){
+        mrca_node <- get_mrca_of_set(tree, quants$label)
+      
+        if(mrca_node > Ntips){
+          subset_node <- mrca_node-Ntips
+        } else{
+          subset_node <- mrca_node
+        }
+        subset_tree <- get_subtree_at_node(tree, subset_node)$subtree
+        print(length(subset_tree$tip.label))
+        
+        # Only label the bigger ones
+        if(length(subset_tree$tip.label) < 1000){
+          mrca_node <- NULL
+        }
+      } else{
+        mrca_node <- NULL
+      }
+      
+      return(mrca_node)
+    })
+  
+  #drop small nodes
+  cls <- cls[!sapply(cls, is.null)]
+  
+  # colours 
+  colourCount = length(cls)
+  getPalette = colorRampPalette(brewer.pal(12, "Paired"))
+  colour.pal <- getPalette(colourCount)
+  
+  p3 <- p2
+  for(l in 1:length(cls)){
+    p3 <- p3 + geom_cladelabel(
+      node=cls[[l]], label=names(cls[l]), 
+      align=T, angle=270, hjust='center', offset.text=.25, 
+      barsize=1.5, color = colour.pal[[l]])
+  }
+  plotvec[[i]] <- p3
+  
+  # Calculate autocorrelation 
+  
+  
+	acfvec[[i]] <- castor::get_trait_acf(tree, tip_states, Npairs=1e8, Nbins=100)
+  
+}
+plot(acf_results$distances, acf_results$autocorrelations, type="l", xlab="distance", ylab="ACF")
+
+# ACF might not make sense for this, but it probably does for the primers
+
+Fig4a <- plotvec[[1]] / plotvec[[2]] / plotvec[[3]] / plotvec[[4]]
+
+Fig4 <- Fig4a - gg.id
+
+Fig4
+
+```
+
+
 # Predicted mismatch
 
-Should be able to multithread this with furrr
 
 ```{r Primerminer, message=FALSE}
 library(PrimerMiner)
@@ -643,7 +1126,7 @@ fs::dir_ls(path="primer_evaluation/PrimerMiner", glob = "*.csv") %>%
 
 ```
 
-## Figure 4 - Mismatch
+## Figure 5 - Mismatch
 
 ```{r figure 4}
 # Load primers
@@ -689,7 +1172,7 @@ summaries <- vroom::vroom("primer_evaluation/mismatch_summary.csv.gz", delim = "
             dplyr::select(primer = name, strand))
 
 # Arrange on tree
-tree <- ape::read.tree("reference/trees/ultrametric_insecta_tree_fulltree.nwk")
+tree <- ape::read.tree("reference/trees/ultrametric_insecta_tree_order_constrained.nwk")
 
 # Filter summaries to just those in tree
 summaries <- summaries %>% 
@@ -806,28 +1289,10 @@ primer_orders <- imputed %>%
   dplyr::summarise(hsp = mean(hsp, na.rm=TRUE), sum = mean(sum, na.rm=TRUE)) %>%
   arrange(hsp)
 
-# LAbel branches
-tax_groups <- tips_to_keep %>%
-dplyr::rename(label = Genus) %>%
-select(label, Order) %>%
-filter(label %in% tree$tip.label) %>%
-group_by(Order)
 
-group_name <- group_keys(tax_groups)  %>%
-mutate(group_name = Order %>% str_remove_all("\\[|\\]"))
-
-cls <- tax_groups %>%
-group_split() %>%
-purrr::map(pull, label) %>%
-set_names(group_name$group_name)
-
-tree2 <- groupOTU(tree, cls)
-
-tree2 <-tree
 # Plot tree
 
-p1 <- ggtree(tree2, ladderize=TRUE, aes(colour=values))# + #,layout = "circular"
-  #geom_text2(aes(subset=!isTip, label=group %>% na_if(0)), hjust=0, check_overlap=TRUE)
+p1 <- ggtree(tree , ladderize=TRUE, aes(colour=values))
 
 weights_p1 <- p1$data %>%
   left_join(imputed %>%
@@ -864,12 +1329,6 @@ tax_groups <- tips_to_keep %>%
 group_name <- group_keys(tax_groups)  %>%
   mutate(group_name = Order %>% str_remove_all("\\[|\\]"))
 
-test <- tax_groups %>% 
-  group_split() %>% 
-  purrr::map(pull, label) %>%
-  set_names(group_name$group_name) 
-x <- test[[11]]
-
 cls <- tax_groups %>% 
   group_split() %>% 
   purrr::map(pull, label) %>%
@@ -889,24 +1348,17 @@ cls <- tax_groups %>%
     }
     subset_tree <- get_subtree_at_node(tree, subset_node)$subtree
     print(length(subset_tree$tip.label))
+    
+    # Only label the bigger ones
+    if(length(subset_tree$tip.label) < 1000){
+      mrca_node <- NULL
+    }
+    
     return(mrca_node)
   })
 
-test <- tax_groups %>%
-  ungroup() %>%
-  dplyr::filter(Order == "Zygentoma") %>%
-  mutate(genus.y = label, genus.x = label) %>%
-  tidyr::expand(genus.y, genus.x) %>%
-  dplyr::filter(!genus.x == genus.y)
-test2 <- get_pairwise_mrcas(tree = tree, A = test$genus.x, B=test$genus.y)
-mode_node <- tail(names(sort(table(test2))), 5)
-
-p3 <- p2
-p3 <- p3 + geom_cladelabel(node=mode_node[1], label="Lepidoptera", align=T, angle=270, hjust='center', offset.text=.5, barsize=1.5)
-p3
-
-
-
+#drop small nodes
+cls <- cls[!sapply(cls, is.null)]
 
 # colours 
 colourCount = length(cls)
@@ -916,7 +1368,6 @@ colour.pal <- getPalette(colourCount)
 # clade label offset
 offsets <- seq(0, length(cls), .5)
 
-i=9
 p3 <- p2
 for(i in 1:length(cls)){
 p3 <- p3 + geom_cladelabel(node=cls[[i]], label=names(cls[i]), align=T, angle=270, hjust='center', offset.text=.25, barsize=1.5, color = colour.pal[[i]])
@@ -961,492 +1412,23 @@ gg.density <- imputed %>%
   theme(legend.position = "none")+
   coord_flip()
 
-#Fig3 <- p2 + gg.mismatch + plot_layout(widths = c(1,2))
 
-Fig3 <- p2 + gg.mismatch + gg.density + plot_layout(widths = c(1,3,0.25))
+Fig4 <- p3 + gg.mismatch + gg.density + plot_layout(widths = c(1,3,0.25))
 
-pdf(file="fig/Fig3.pdf", width = 8, height = 11 , paper="a4")
-  plot(Fig3)
+pdf(file="fig/Fig4_mismatch.pdf", width = 8, height = 11 , paper="a4")
+  plot(Fig4)
 try(dev.off(), silent=TRUE)
  
 #- Add a summary metric for mean mismatch for each primer
 #- Add a summary metric for evennes of mismatch for each primer
 #- Add a summary metric for amount of missing data imputed. Is there a way to highlight what data was imputed or not?
 #- Add a metric for amount of degeneracy in each primer
-```
-
-
-# Identification sucess
-
-In order to evaluate the taxonomic resolution of different barcode regions, alignments were trimmed to primer regions using the in silico PCR function from the insect package and  the identificaiton sucess functions from the SPIDER r package were used
-
-Metrics to evaluate primers on:
- *  OTU clustering of each primer at different ranks, see drop off
- *  OTU clustering, subset to pests only (ie fraction of pests in their own cluster)
- *  Datasets subset to pest genera (or families), evaluated with spider nearNeighbour, BestCloseMatch, ThreshID, Monophyly
- * Leave one out BLAST/RDP?
- * P(LCR) for each primer?
- 
- 
-## Virtual PCR
-
-```{r Virtual PCR}
-# Load seqs
-seqs <- readDNAStringSet("reference/merged_final.fa.gz")
-seqs <- seqs[lengths(seqs)==712]
-
-# Load primers
-primers <- read_csv("primer_evaluation/primer_candidates.csv") %>%
-  mutate(seq = str_replace_all(seq, "I","N")) %>% 
-  select(-score, -issues)
-
-# Get all possible primer combinations
-combos <- expand_grid(primers %>% filter(strand=="F") %>% pull(seq),
-                      primers %>% filter(strand=="R") %>% pull(seq)
-                      ) %>%
-  mutate_if(is.factor, as.character)%>%
-  unique() %>%
-  magrittr::set_colnames(c("Fseq", "Rseq")) %>%
-  left_join(primers %>% filter(strand=="F") %>% rename_all(. %>% paste0("F",.)), by="Fseq") %>%
-  left_join(primers %>% filter(strand=="R") %>% rename_all(. %>% paste0("R",.)), by="Rseq") %>%
-  mutate(amplicon = Rstart - Fend) %>%
-  filter(amplicon > 50)
-
-dir.create("primer_evaluation/amplicons")
-
-# Setup multithreading
-library(foreach)
-library(doParallel)
-cores=12
-cl <- parallel::makeCluster(cores)
-registerDoParallel(cl)
-
-li <- foreach(p=1:nrow(combos)) %dopar% {
-  #get primer names
-  primernames <- paste0(combos$Fname[p], "_",  combos$Rname[p])
   
-  # cut down alignments
-  amplicon <- Biostrings::subseq(seqs, start=combos$Fend[p]+1, end = combos$Rstart[p]) #may need to add 1 to start
+# Calculate phylogenetic signal
   
-  if (any(!lengths(amplicon)== combos$amplicon[p])){
-    warning(paste0("Amplicons of ",primernames, " are not the same length"))
-  }
-  
-  maxgaps <- 9 # dont allow any more than 9 gaps
-  rem <- names(amplicon)[Biostrings::letterFrequency(amplicon, "-") > maxgaps]
-  amplicon <- amplicon[!names(amplicon) %in% rem]
-  message(paste0(length(rem), " Sequences with more than ", maxgaps, " gaps removed from ", primernames))
-  
-  #write out sequences
-  Biostrings::writeXStringSet(amplicon, file=paste0("primer_evaluation/amplicons/", primernames,".fa.gz"), compress=TRUE)
-}
-#close cluster
-parallel::stopCluster(cl)
-
-```
- 
-## Pairwise ID Success
-
-Submit array
-
-njobs=$(cat job_index | wc -l)
-sbatch --array=1-808 submit_clustering.slurm
-
-### Creat USEARCH distance matrix
-```{bash generate job index}
-#!/bin/bash
-dos2unix bash/usearch_distmat.sh
-/usr/bin/ls -d /group/pathogens/Alexp/Metabarcoding/primer_evaluation/primer_evaluation/amplicons/* | sed -e '1p' -e '/.fa.gz/!d' | sort -u > job_index.txt
-njobs=$(cat job_index.txt | wc -l)
-sbatch --array=1-$njobs bash/usearch_distmat.sh
-```
-
-From this distance matrix...
-Can calculate the probability of lowest common ancestor at different similarities
-
-## Get mixed clusters
-
-```{r analyse uclust}
-# Summarise number of mixed clusters that contain pests at %
-pestlist <- read_csv("primer_evaluation/pestlist.csv") 
-
-# Load primers
-primers <- read_csv("primer_evaluation/primer_candidates.csv") %>%
-  mutate(seq = str_replace_all(seq, "I","N"))  %>%
-  distinct()
-
-# Get all possible primer combinations
-combos <- expand_grid(primers %>% filter(strand=="F") %>% pull(seq),
-                      primers %>% filter(strand=="R") %>% pull(seq)
-                      ) %>%
-  mutate_if(is.factor, as.character)%>%
-  unique() %>%
-  magrittr::set_colnames(c("Fseq", "Rseq")) %>%
-  left_join(primers %>% filter(strand=="F") %>% rename_all(. %>% paste0("F",.)), by="Fseq") %>%
-  left_join(primers %>% filter(strand=="R") %>% rename_all(. %>% paste0("R",.)), by="Rseq") %>%
-  mutate(amplicon = Rstart - Fend) %>%
-  filter( amplicon > 100)
-
-# Check missing
-complete <- list.files(path="primer_evaluation/amplicons/usearch_output/", pattern = ".txt.gz") %>%
-  basename %>%
-  str_remove(".txt.gz")
-
-setdiff(paste0(combos$Fname, "_",  combos$Rname), complete)
-setdiff(complete,paste0(combos$Fname, "_",  combos$Rname))
-
-
-# Get mixed clusters
-library(furrr)
-plan(multiprocess, workers=4)
-mixed_clusters <- fs::dir_ls(path="primer_evaluation/amplicons/usearch_output/", glob = "*.txt.gz")%>%
-  furrr::future_map(function(x){
-  #purrr::map(function(x){
-  df <- vroom::vroom(x, delim="\t", col_names = c("acc1", "acc2", "dist")) %>%
-    dplyr::mutate(spp1 = acc1 %>%
-                    str_remove(";$") %>%
-                    str_remove("^.*;"),
-                  acc1 = acc1 %>% str_remove(";.*$"),
-                  spp2 = acc2 %>%
-                    str_remove(";$") %>%
-                    str_remove("^.*;"),
-                  acc2 = acc2 %>% str_remove(";.*$"),
-                  dist = round(dist, 2)) %>%
-    dplyr::filter(!spp1==spp2)
-
-  all <- df %>%
-        dplyr::group_by(dist) %>% 
-        dplyr::summarise(mixed=n_distinct(spp1)) %>%
-        dplyr::mutate(type="all")
-  pests <- df %>%
-        dplyr::group_by(dist) %>% 
-        filter(spp1 %in% pestlist$Species) %>%
-        dplyr::summarise(mixed=n_distinct(spp1)) %>%
-        dplyr::mutate(type="pest")
-      out <- bind_rows(all, pests)
-      return(out)
-  
-  })%>%
-  bind_rows(.id="source") %>%
-  mutate(source = str_remove(basename(source), ".txt.gz"))
-  
-#Get amplified
-amplified <- fs::dir_ls(path="primer_evaluation/amplicons/", glob = "*.fa.gz") %>%
-   purrr::map(function(x){
-   #furrr::future_map(function(x){
-     df <- fasta.index(x) %>%
-        mutate(species = desc %>% 
-                 str_remove("(?:[^;]*;){7}") %>% #match 7th ;
-                 str_remove(";$")) # match last ;
-     all <- df %>%
-      dplyr::group_by(filepath) %>%
-      dplyr::summarise(seqs_amplified = n(), spp_amplified = n_distinct(species)) %>%
-      dplyr::mutate(type="all")
-     pests <- df %>%
-      dplyr::group_by(filepath) %>%
-      dplyr::filter(species %in% pestlist$Species) %>%
-      dplyr::summarise(seqs_amplified = n(), spp_amplified = n_distinct(species)) %>%
-      dplyr::mutate(type="pest")
-     out <- bind_rows(all, pests)
-    return(out)
-   }) %>%
-  bind_rows() %>%
-  mutate(source = str_remove(basename(filepath), ".fa.gz")) %>%
-  dplyr::select(-filepath)
-
-joint <- mixed_clusters %>%
-  left_join(amplified) %>%
-  mutate(combos = source) %>% 
-  tidyr::separate(source, into=c("Fname", "Rname"), sep="_", extra="merge")
-vroom::vroom_write(joint, "primer_evaluation/amplicons/mixed_clusters_summary.csv", delim=",")
-
-
-## Plot
-
-
-# Count reads
-joint <- vroom::vroom("primer_evaluation/amplicons/mixed_clusters_summary.csv", delim=",") %>%
-  left_join(combos) %>% 
-  mutate(success =  (spp_amplified - mixed)/spp_amplified,
-         threshold = 1-dist) %>%
-  dplyr::select(Fname,Rname, dist, threshold,
-                mixed, type, seqs_amplified,
-                spp_amplified, amplicon, combos, success) 
-
-
-
-# Look at log ratio to the folmer region
-ref <- joint %>% 
-  dplyr::filter(Fname == "LCO1490"&  Rname=="HCO2198") %>% 
-              select(ref_success = success,
-                     dist, threshold, type) %>%
-  dplyr::filter(threshold %in% c(0.97,0.98,0.99, 1))%>%
-  group_by(type) %>%
-  summarise(ref_success = mean(ref_success)) %>%
-  ungroup()
-
-id_success <- joint %>% 
-  dplyr::filter(threshold %in% c(0.97,0.98,0.99, 1))%>%
-  group_by(Fname, Rname, type, combos, amplicon, threshold) %>%
-  summarise(success = mean(success)) %>%
-  ungroup() %>%
-  left_join(ref) %>%
-  mutate(success_alr = log(success/ref_success),
-         success_rat = success/ref_success,
-         highlight = case_when(
-           combos %in% c("fwhF2_fwhR2n", "fwhF2_HexCOIR4") ~ TRUE,
-           TRUE ~ FALSE
-         ))
-
-gg.id <- id_success %>%
-  ggplot(aes(x=amplicon, y=success_alr, colour=success_alr))+
-  geom_jitter(width = 5, height=0, alpha=0.5)+
-  geom_smooth(colour="black", method="lm")+
-  #geom_vline(xintercept = 220, colour="grey80") +
-  #geom_vline(xintercept = 420, colour="grey80")+
-  scale_colour_gradient(low ="firebrick", high ="darkslateblue", na.value = "grey") +
-  geom_hline(yintercept=0, colour="grey80")+
-  base_theme+
-  facet_grid(threshold~type) +
-  theme(legend.position = "none") + 
-  labs(x="Amplicon length",
-       y="Log(sucessful ID / LCO-HCO)") 
-
-gg.id
-
-
-## MODEL
-# see whats signfiicant 
-model_dat <- id_success %>%
-  dplyr::select(combos, amplicon, threshold, success_alr) 
-
-library(tidymodels)
-lm_mod <- linear_reg() %>%
-  set_engine("lm") %>%
-  set_mode("regression")  %>%
-  step_normalize(all_predictors())
-
-lm_fit <- 
-  lm_mod %>% 
-  fit(success_alr ~ 0 + amplicon + threshold, data = model_dat)
-
-# Group by theshold?
-tidy(lm_fit)
-
-
-# Write out id
-pdf(file="fig/id_success.pdf", width = 8, height = 11 , paper="a4")
-  plot(gg.id)
-try(dev.off(), silent=TRUE)
-
-library(plotly)
-ggplotly(gg.id)
-
-library(tidytext)
-
-# Barchart
-id_success %>%
-  filter(threshold=="0.97") %>%
- # group_by(threshold,type) %>%
-  #top_frac(.1, success_alr) %>% 
-  #ungroup() %>%
-  ggplot(aes(x=tidytext::reorder_within(combos, success_alr, threshold), y=success_alr, fill=combos))+
-  geom_col() + 
-  facet_grid(threshold~type, drop=TRUE, scales="free") +
-  scale_x_reordered() +
-  coord_flip() +
-  theme(axis.text.x = element_text(angle=45, hjust=1),
-        legend.position = "none")+
-  base_theme +
-  geom_rangeframe(colour="black")+
-  labs(x="Amplicon length",
-       y="Log(sucessful ID / LCO-HCO)")
-
-# Can i take the mean of the different threshold values?
-
-
 
 ```
 
-## ID success on tree
-
-for this we will analyse just the LCO HCO data. Will need to take in the raw amplicons data
-
-Arrange this on the tree and see how much phylogenetic signal there is
-
-The phylogenetic autocorrelation function (ACF) of known 16S GCNs across the SILVA-derived tree (Fig. 1a) was calculated using the castor function get_trait_acf based on 108 tip pairs (options “Npairs=1e8, Nbins=100”), chosen randomly among tips with known GCN. The function get_trait_acf randomly picks OTU pairs on the tree, bins them into one of many intervals of phylogenetic distance, and calculates the Pearson autocorrelation between GCNs of the OTU pairs within each bin. Note that this analysis does not assume that GCNs scale linearly with phylogenetic distance. Instead, the ACF merely measures the statistical correlation between GCNs on distinct tips, conditional upon the tips being within a certain phylogenetic distance from each other.
-
-```{r ID success on tree}
-# Arrange on tree
-library(castor)
-tree <- rncl::read_newick_phylo("reference/trees/ultrametric_insecta_tree_depth5.nwk")
-
-# Prune tree to genus
-tips_to_keep <- dat %>%
-  dplyr::select(Kingdom, Phylum, Class, Order, Family, Genus, Species) %>%
-  dplyr::filter(!duplicated(Species)) %>%
-  dplyr::filter(Class=="Insecta") %>%
-  filter(Genus %in% (summaries %>% pull(Genus))) %>%
-  group_by(Genus) %>%
-  dplyr::slice(1) %>%
-  ungroup() %>%
-  mutate(name_check = case_when(
-    str_extract(Species, "^.+?(?=_)") == Genus ~ TRUE,
-    !str_extract(Species, "^.+?(?=_)") == Genus ~ FALSE
-  )) %>%
-  filter(name_check) %>%
-  dplyr::select(-name_check)
-
-tree  <- castor::get_subtree_with_tips(tree,
-                                          omit_tips=setdiff(tree$tip.label, tips_to_keep$Species),
-                                          collapse_monofurcations=TRUE,
-                                          force_keep_root=TRUE)$subtree
-
-#Prune names to genus
-tree$tip.label <- tree$tip.label %>% str_extract("^.+?(?=_)")
-
-Ntips 	<- length(tree$tip.label)
-Nnodes 	<- tree$Nnode
-cat(sprintf("Tree has %d nodes, %d tips and %d edges\n",Nnodes,Ntips,nrow(tree$edge)));
-
-# create internal node labels
-tree$node.label <- NA
-if(is.na(tree$node.label)){
-	cat(sprintf("Adding node labels to full tree..\n"))
-	tree$node.label = paste("node.", 1:Nnodes, sep = "") # don't use underscores, because some tree readers (e.g. rncl) interpret them as spaces
-}
-
-# replace zero-length edges
-if(any(tree$edge.length==0)){
-  epsilon = 0.1*min(tree$edge.length[tree$edge.length>0])
-	cat(sprintf("Note: Some edges have length zero, which may break some of the HSP routines. Replacing zero-lengths with a tiny positive length (%g)..\n",epsilon))
-	tree$edge.length[tree$edge.length==0] = epsilon
-}
-
-
-## Get values for higher nodes with castor
-uprimers <- unique(summaries$primer)
-p_weights <- vector("list", length=length(uprimers))
-for (i in 1:length(uprimers)){
-  print(paste0("Processing Primer ",i, " of ", length(uprimers), ": ", uprimers[i]))
-  tip_states <- summaries %>%
-    dplyr::filter(primer==uprimers[i], Genus %in% tips_to_keep$Genus) %>%
-    group_by(Genus) %>%
-    summarise(values = mean(sum, na.rm=TRUE))%>%
-    ungroup() %>%
-    column_to_rownames("Genus")
-    
-  row2tip <- match(rownames(tip_states), tree$tip.label)
-  tip_states <- tip_states[!is.na(row2tip),,drop = FALSE]
-  hsp_states <- castor::hsp_independent_contrasts(tree = tree,
-                                              tip_states = tip_states$values,
-                                              weighted = TRUE,
-                                              check_input = TRUE)$states
-  
-   p_weights[[i]] <- tip_states %>%
-    rownames_to_column("Genus") %>%
-    mutate(hsp = hsp_states[1:Ntips])
-}
-names(p_weights) <- uprimers
-
-imputed <- summaries %>%
-    left_join(bind_rows(p_weights,.id = "primer"), 
-               by = c("primer", "Genus")) %>%
-  filter(!is.na(hsp))
-
-primer_orders <- imputed %>%
-  group_by(primer) %>%
-  dplyr::summarise(hsp = mean(hsp, na.rm=TRUE), sum = mean(sum, na.rm=TRUE)) %>%
-  arrange(hsp)
-
-# LAbel branches
-tax_groups <- tips_to_keep %>%
-dplyr::rename(label = Genus) %>%
-select(label, Order) %>%
-filter(label %in% tree$tip.label) %>%
-group_by(Order)
-
-group_name <- group_keys(tax_groups)  %>%
-mutate(group_name = Order %>% str_remove_all("\\[|\\]"))
-
-cls <- tax_groups %>%
-group_split() %>%
-purrr::map(pull, label) %>%
-set_names(group_name$group_name)
-
-tree2 <- groupOTU(tree, cls)
-
-# Plot tree
-p1 <- ggtree(tree2, ladderize=TRUE, aes(colour=values)) +
-  geom_text2(aes(subset=!isTip, label=group %>% na_if(0)), hjust=0, check_overlap=TRUE)
-
-weights_p1 <- p1$data %>%
-  left_join(imputed %>%
-              group_by(Genus) %>%
-              summarise(values = mean(sum, na.rm=TRUE))%>%
-              dplyr::rename(label = Genus)
-    )  
-
-
-tip_states <- weights_p1 %>%
-  dplyr::filter(isTip) %>%
-  pull(values)
-names(tip_states) <- weights_p1 %>%
-  dplyr::filter(isTip) %>%
-  pull(label)
-
-weights_p1$values[!weights_p1$isTip] <- castor::asr_independent_contrasts(tree=tree,
-                                                        tip_states=tip_states)$ancestral_states
-
-p2 <- p1 %<+% weights_p1 + geom_tippoint(aes(colour=values)) +
-  scale_color_gradient(low="darkslateblue", high="firebrick") +
-  theme(legend.position = "none") + 
-  scale_y_continuous(expand=c(0,0))+ 
-  scale_x_discrete(expand=c(0,0)) 
-
-
-###################################
-# AUTOCORRELATION FUNCTION OF TRAIT
-
-if(INCLUDE_ACF){
-	cat(sprintf("Calculating ACF and MRD of trait '%s'..\n",trait_name))
-	acf_results = castor::get_trait_acf(known_tree, known_tip_states, Npairs=1e8, Nbins=100)
-
-	# save stats to file
-	cat(sprintf("Saving autocorrelation function to TSV file..\n"))
-	output_path = sprintf("output/ACF.tsv")
-	check_output_file(output_path,TRUE,TRUE,"  ");						
-	cat(sprintf("# Phylogenetic autocorrelation function (ACF) and mean absolute difference (MAD), of '%s' across tips\n# ACF(x) = correlation between the states of two random tips at distance x from each other\n# distance\tautocorrelation\tmean_absolute_deviation\tmean_relative_deviation\tNpairs\n",trait_name), file=output_path, append=FALSE);
-	write.table(x=data.frame(acf_results$distances, acf_results$autocorrelations, acf_results$mean_abs_differences, acf_results$mean_rel_differences, acf_results$Npairs_per_distance), file=output_path, append=TRUE, sep="\t", row.names=FALSE, col.names=FALSE, quote = FALSE);
-
-	# plot ACF
-	cat(sprintf("Plotting ACF..\n"))
-	plot_file=sprintf("output/ACF.pdf")
-	check_output_file(plot_file,TRUE,TRUE,"  ")
-	pdf(file=plot_file, width=DEFAULT_PLOT_WIDTH, height=DEFAULT_PLOT_HEIGHT);
-	par(las=1);
-	plot(x=100*acf_results$distances, y=acf_results$autocorrelations, type="l", col="black", pch=1, cex=0.6, las=1, lwd=1.5, xlab="phylogenetic distance (% substitutions per site)", ylab="autocorrelation", xlim=c(0,80), ylim=c(-0.1,max(acf_results$autocorrelations[acf_results$distances<=1],na.rm=TRUE)));
-	invisible(dev.off());
-
-	# plot MAD
-	cat(sprintf("Plotting MAD..\n"))
-	plot_file=sprintf("output/mean_abs_differences.pdf")
-	check_output_file(plot_file,TRUE,TRUE,"  ")
-	pdf(file=plot_file, width=DEFAULT_PLOT_WIDTH, height=DEFAULT_PLOT_HEIGHT);
-	par(las=1);
-	plot(x=100*acf_results$distances, y=acf_results$mean_abs_differences, type="l", col="black", pch=1, cex=0.6, las=1, lwd=1.5, xlab="phylogenetic distance (% substitutions per site)", ylab="mean abs difference", xlim=c(0,80), ylim=c(-0.1,max(acf_results$mean_abs_differences[acf_results$distances<=1],na.rm=TRUE)));
-	invisible(dev.off());
-	
-	# plot MRD
-	cat(sprintf("Plotting MRD..\n"))
-	plot_file=sprintf("output/mean_rel_differences.pdf")
-	check_output_file(plot_file,TRUE,TRUE,"  ")
-	pdf(file=plot_file, width=DEFAULT_PLOT_WIDTH, height=DEFAULT_PLOT_HEIGHT);
-	par(las=1);
-	plot(x=100*acf_results$distances, y=acf_results$mean_rel_differences, type="l", col="black", pch=1, cex=0.6, las=1, lwd=1.5, xlab="phylogenetic distance (% substitutions per site)", ylab="mean rel difference", xlim=c(0,80), ylim=c(-0.1,max(acf_results$mean_rel_differences[acf_results$distances<=1],na.rm=TRUE)));
-	invisible(dev.off());
-}
-```
 
 
 ## Get LCA Probabilities
