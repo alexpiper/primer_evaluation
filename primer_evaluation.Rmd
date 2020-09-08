@@ -105,7 +105,7 @@ dat_resolved <- dat %>% mutate(mapped =taxreturn::map_to_ott(Species, db, resolv
   mutate(mapped = mapped %>% str_remove("^NA") %>% paste0(rows, .)) %>%  #Add dummy accession number
   dplyr::select(-rows)
 
-lineage <- get_ott_lineage(dat_resolved$mapped, db) %>% 
+lineage <- get_ott_lineage(dat_resolved$mapped, db) %>%
   bind_cols(dat_resolved) %>% 
   dplyr::select(-mapped, -tax_name, -Species) %>% 
   rename_all(funs(str_to_sentence(.))) %>%
@@ -115,6 +115,38 @@ lineage <- get_ott_lineage(dat_resolved$mapped, db) %>%
 #Write out final list of pests 
 write_csv(lineage, "primer_evaluation/pestlist.csv")
 ```
+
+## Seqs per pest taxa
+
+```{R}
+seqs <- readFASTA("reference/database_builder/09_lengthfilt.fa.gz")
+pestlist <- read_csv("primer_evaluation/pestlist.csv") %>%
+  filter(Class=="Insecta") %>%
+  distinct()
+
+taxa <- names(seqs)%>%
+  enframe() %>%
+  select(-name) %>%
+  separate(value, into=c("acc", "species"), sep=";") %>%
+  mutate(pest = case_when(
+    species %in% pestlist$Species ~ TRUE,
+    !species %in% pestlist$Species ~ FALSE
+  ))
+
+#Number of taxa per species
+n_seqs <- taxa %>% 
+  group_by(species, pest) %>%
+  summarise(sum = n())
+
+# Mean number of seqs per spp
+t.test(n_seqs %>% filter(pest) %>% pull(sum), n_seqs %>% filter(!pest) %>% pull(sum)) %>%
+  broom::tidy()
+
+# How many taxa didnt have seqs
+table(pestlist$Species %in% taxa$species)
+
+```
+
 
 ## Figure 1
 
@@ -772,7 +804,7 @@ joint <- mixed_clusters %>%
   left_join(amplified) %>%
   mutate(combos = source) %>% 
   tidyr::separate(source, into=c("Fname", "Rname"), sep="_", extra="merge")
-vroom::vroom_write(joint, "primer_evaluation/amplicons/mixed_clusters_summary.csv", delim=",")
+#vroom::vroom_write(joint, "primer_evaluation/amplicons/mixed_clusters_summary.csv", delim=",")
 
 
 # Make figure
@@ -824,10 +856,14 @@ breakpoint_fit <- model_dat %>%
          summary = map(fits, summary),
          preds = map2(fits, data, predict),
          breakpoint = map(fits, "chngpt"),
+         breakpoint_ests = map(summary, function(x){ as.data.frame(t(x$chngpt))}),
          coef_info = map(summary,function(x){ as_tibble(x$coefficients, rownames="term" )}),
          )
   
-
+# Get SE of breakpoints
+breakpoint_fit %>% 
+  unnest(breakpoint_ests) %>% 
+ select(-where(is.list)) 
 
 slope_coefs <- breakpoint_fit %>%
   unnest(coef_info) %>%
@@ -861,6 +897,11 @@ break_annot <- dat_pred %>%
               filter(term == "post_slope") %>%
               select(threshold, pval, signif))
 
+# Highest success
+ref_annot <- id_success %>%
+  mutate(type = type %>% str_replace("all", "All Insects") %>% str_replace("pest", "Pest Insects")) %>% 
+  group_by(threshold, type) %>%
+  filter(combos == "LCO1490_HCO2198")
 
 gg.id <- id_success %>%
   mutate(type = type %>% str_replace("all", "All Insects") %>% str_replace("pest", "Pest Insects")) %>%
@@ -874,6 +915,8 @@ gg.id <- id_success %>%
   geom_text(data=break_annot, aes(x=amplicon, y=preds,
                                   label=paste0(breakpoint, "bp p",ifelse(pval < 0.001,"<0.001", ">0.001"))),
             nudge_y = 0.1,nudge_x = 120,  color = 'red', inherit.aes = FALSE) +
+  geom_text(data=ref_annot, aes(x=amplicon, y=success,label=paste0("Max: ",round((success* 100),2), "%")),
+            nudge_y = 0.05,  color = 'blue', inherit.aes = FALSE) +
   geom_vline(data=dat_pred, aes(xintercept = breakpoint), colour="black", linetype = "dashed") +
   scale_colour_gradient(low ="firebrick", high ="darkslateblue", na.value = "grey") +
   geom_hline(yintercept=0, colour="grey80")+
@@ -947,7 +990,6 @@ tips_to_keep <- tree$tip.label %>%
   enframe() %>% 
   tidyr::separate(value, into=c("acc", "Species"), sep="\\|") %>%
   left_join(lineage, by="acc") %>%
-  #filter(Genus %in% (folmer_id %>% pull(Genus))) %>%
   group_by(Genus) %>%
   dplyr::slice(1) %>%
   ungroup() %>%
@@ -955,43 +997,43 @@ tips_to_keep <- tree$tip.label %>%
 
 
 #Get subtree of only genera
-tree  <- castor::get_subtree_with_tips(tree,
+genus_tree  <- castor::get_subtree_with_tips(tree,
                                           only_tips = tips_to_keep$tips,
                                           collapse_monofurcations=TRUE,
                                           force_keep_root=TRUE)$subtree
 
 
 #Prune names to genus
-tree$tip.label <- tree$tip.label %>% 
+genus_tree$tip.label <- genus_tree$tip.label %>% 
   str_remove("^.*\\|") %>%
   str_extract("^.+?(?=_)")
 
 # Filter id sucess to just those in tree
-folmer_id <- folmer_id %>%
-  dplyr::filter(Genus %in%  tree$tip.label)
+folmer_id_filtered <- folmer_id %>%
+  dplyr::filter(Genus %in%  genus_tree$tip.label)
 
-Ntips 	<- length(tree$tip.label)
-Nnodes 	<- tree$Nnode
-cat(sprintf("Tree has %d nodes, %d tips and %d edges\n",Nnodes,Ntips,nrow(tree$edge)));
+Ntips 	<- length(genus_tree$tip.label)
+Nnodes 	<- genus_tree$Nnode
+cat(sprintf("Tree has %d nodes, %d tips and %d edges\n",Nnodes,Ntips,nrow(genus_tree$edge)));
 
 # create internal node labels
-tree$node.label <- NA
-if(is.na(tree$node.label)){
+genus_tree$node.label <- NA
+if(is.na(genus_tree$node.label)){
 	cat(sprintf("Adding node labels to full tree..\n"))
-	tree$node.label = paste("node.", 1:Nnodes, sep = "") # don't use underscores, because some tree readers (e.g. rncl) interpret them as spaces
+	genus_tree$node.label = paste("node.", 1:Nnodes, sep = "") # don't use underscores, because some tree readers (e.g. rncl) interpret them as spaces
 }
 
 # replace zero-length edges
-if(any(tree$edge.length==0)){
-  epsilon = 0.1*min(tree$edge.length[tree$edge.length>0])
+if(any(genus_tree$edge.length==0)){
+  epsilon = 0.1*min(genus_tree$edge.length[genus_tree$edge.length>0])
 	cat(sprintf("Note: Some edges have length zero, which may break some of the HSP routines. Replacing zero-lengths with a tiny positive length (%g)..\n",epsilon))
-	tree$edge.length[tree$edge.length==0] = epsilon
+	genus_tree$edge.length[genus_tree$edge.length==0] = epsilon
 }
 
 # Plot tree
 
 # Loop over all different dists
-thresholds <- unique(folmer_id$threshold)
+thresholds <- unique(folmer_id_filtered$threshold)
 plotvec <- vector("list", length = length(thresholds))
 names(plotvec) <- thresholds
 
@@ -1001,10 +1043,10 @@ names(acfvec) <- thresholds
 i=1
 for(i in 1:length(thresholds)){
   
-  p1 <- ggtree(tree , ladderize=TRUE, aes(colour=values), layout = "circular") 
+  p1 <- ggtree(genus_tree , ladderize=TRUE, aes(colour=values), layout = "circular") 
   
   weights_p1 <- p1$data %>%
-    left_join(folmer_id %>% 
+    left_join(folmer_id_filtered %>% 
                 filter(threshold == thresholds[i]) %>%
                 select(-threshold) %>%
                 dplyr::rename(label = Genus, values = mixed))%>%
@@ -1018,7 +1060,7 @@ for(i in 1:length(thresholds)){
     dplyr::filter(isTip) %>%
     pull(label)
   
-  weights_p1$values[!weights_p1$isTip] <- castor::asr_independent_contrasts(tree=tree,
+  weights_p1$values[!weights_p1$isTip] <- castor::asr_independent_contrasts(tree=genus_tree,
                                                           tip_states=tip_states, check_input = FALSE)$ancestral_states
 #
   #weights_p1 <- weights_p1 %>%
@@ -1039,7 +1081,7 @@ for(i in 1:length(thresholds)){
   tax_groups <- tips_to_keep %>%
     dplyr::rename(label = Genus) %>%
     select(label, Order) %>%
-    filter(label %in% tree$tip.label) %>%
+    filter(label %in% genus_tree$tip.label) %>%
     group_by(Order) 
   
   group_name <- group_keys(tax_groups)  %>%
@@ -1057,14 +1099,14 @@ for(i in 1:length(thresholds)){
         dplyr::filter(between(y, left=quantile(labs$y,  probs =0.1), right=quantile(labs$y,  probs =0.90)))
       
       if(length(quants$label) > 1){
-        mrca_node <- get_mrca_of_set(tree, quants$label)
+        mrca_node <- get_mrca_of_set(genus_tree, quants$label)
       
         if(mrca_node > Ntips){
           subset_node <- mrca_node-Ntips
         } else{
           subset_node <- mrca_node
         }
-        subset_tree <- get_subtree_at_node(tree, subset_node)$subtree
+        subset_tree <- get_subtree_at_node(genus_tree, subset_node)$subtree
         print(length(subset_tree$tip.label))
         
         # Only label the bigger ones
@@ -1094,16 +1136,8 @@ for(i in 1:length(thresholds)){
       barsize=1.5, color = colour.pal[[l]])
   }
   plotvec[[i]] <- p3
-  
-  # Calculate autocorrelation 
-  
-  
-	acfvec[[i]] <- castor::get_trait_acf(tree, tip_states, Npairs=1e8, Nbins=100)
-  
-}
-plot(acf_results$distances, acf_results$autocorrelations, type="l", xlab="distance", ylab="ACF")
 
-# ACF might not make sense for this, but it probably does for the primers
+}
 
 Fig4a <- plotvec[[1]] / plotvec[[2]] / plotvec[[3]] / plotvec[[4]]
 
@@ -1114,6 +1148,103 @@ Fig4
 pdf(file="fig/Fig4_id_success.pdf", width = 8, height = 11 , paper="a4")
   plot(Fig4)
 try(dev.off(), silent=TRUE)
+  
+  
+# Autocorrelation
+tree <- ape::read.tree("reference/trees/ultrametric_insecta_tree_order_constrained.nwk")
+
+# Get mixed clusters for the LCO-HCO gene region
+folmer_id_spp <- vroom::vroom("primer_evaluation/amplicons/usearch_output/LCO1490_HCO2198.txt.gz",
+                          delim="\t", col_names = c("acc1", "acc2", "dist")) %>%
+    dplyr::mutate(spp1 = acc1 %>%
+                    str_remove(";$") %>%
+                    str_remove("^.*;"),
+                  acc1 = acc1 %>% str_remove(";.*$"),
+                  spp2 = acc2 %>%
+                    str_remove(";$") %>%
+                    str_remove("^.*;"),
+                  acc2 = acc2 %>% str_remove(";.*$"),
+                  dist = round(dist, 2)) %>%
+    mutate(threshold = 1-dist) %>%
+    filter(threshold %in% c(0.97, 0.98,0.99,1)) %>%
+    dplyr::filter(!spp1==spp2)%>%
+    dplyr::group_by(threshold, spp1) %>% 
+    dplyr::summarise(mixed=n_distinct(spp2)) %>%
+    ungroup() %>%
+  mutate(species = spp1 %>% str_replace_all(" ", "_")) %>%
+  select(threshold, species, values = mixed)
+
+# Prune tree to genus
+tree$tip.label <- tree$tip.label %>% 
+  enframe() %>% 
+  tidyr::separate(value, into=c("acc", "Species"), sep="\\|") %>%
+  left_join(lineage, by="acc") %>%
+  pull(Species)
+
+thresholds <- unique(folmer_id_spp$threshold)
+acfvec <- vector("list", length = length(thresholds))
+names(acfvec) <- thresholds
+
+i=1
+for(i in 1:length(thresholds)){
+  weights <- tree$tip.label %>% 
+    enframe() %>% 
+    select(-name, species = value) %>%
+      left_join(folmer_id_spp %>% 
+                  filter(threshold == thresholds[i]) %>%
+                  select(-threshold))%>%
+      mutate(values = values %>% replace_na(0))
+                
+  tip_states <- weights %>%
+    dplyr::pull(values)
+  names(tip_states) <- weights %>%
+    dplyr::pull(species)
+  
+  # Autocorrelation funciton
+  acf <- castor::get_trait_acf(tree, tip_states, Npairs=1e8, Nbins=100)
+  
+  # Trait depth
+  tip_states_binary <- tip_states
+  tip_states_binary[tip_states_binary >0] <- 1
+  consentrait <- get_trait_depth(tree, tip_states_binary, count_singletons=FALSE, weighted=TRUE, Npermutations = 1000)
+  
+  # Create output data frame
+  acfvec[[i]] <- data.frame(
+    distances = acf$distances,
+    acf_acf = acf$autocorrelations,
+    acf_mean_abs = acf$mean_abs_differences,
+    acf_mean_rel = acf$mean_rel_differences,
+    acf_npairs = acf$Npairs_per_distance,
+    trait_mean = consentrait$mean_depth,
+    trait_std = sqrt(consentrait$var_depth),
+    trait_n = consentrait$Npositives,
+    trait_p = consentrait$P
+    )
+}
+
+acf <- acfvec %>%
+  bind_rows(.id="threshold") %>%
+  group_by(threshold) %>%
+  pivot_longer(starts_with("acf_"),
+               names_to="type",
+               values_to="value")
+
+ggplot(acf, aes(x = distances, y=value)) +
+  geom_line() +
+  facet_grid(type~threshold, scales="free_y")
+
+
+#  Look at clade with the highest positives
+hist(consentrait$positives_per_clade)
+
+pos <- consentrait$positives_per_clade
+
+which.max(pos)
+
+subset_tree <- get_subtree_at_node(tree, which.max(pos) -Ntip(tree))$subtree
+subset_tree$tip.label
+
+       
 ```
 
 
@@ -1178,38 +1309,34 @@ dat <- fs::dir_ls(path="primer_evaluation/PrimerMiner", glob = "*.csv|*.csv.gz")
   mutate(Template = str_remove(Template, ";$"))%>%
   separate(col=Template, into=c("Acc","Kingdom","Phylum","Class","Order","Family","Genus","Species"), sep=";") %>%
   dplyr::rename(Sequence = sequ) %>% 
-  dplyr::mutate(primer = str_remove(basename(source), ".csv")) 
+  dplyr::mutate(primer = source %>% 
+                  basename() %>%
+                  str_remove(".csv") %>%
+                  str_remove(".gz$")) %>%
+  dplyr::select(primer,Acc, Genus, species, sum)
 
-# set summary level
-#sumlevel <- "Family"
+vroom::vroom_write(dat, "primer_evaluation/mismatch_all.csv.gz",delim = ",")
 
-summaries <- dat %>%
+genus_summaries <- vroom::vroom("primer_evaluation/mismatch_all.csv.gz", delim = ",") %>%
   tidyr::separate(Acc, into=c("Acc", "tax_id"), sep="\\|") %>%
   group_by(primer, Genus, tax_id) %>% #Group by higher to minimize plotting
-  summarise(sum = mean(sum)) %>%
+  summarise(sum = mean(sum, na.rm=TRUE)) %>%
   ungroup()%>%
   mutate(dup = paste0(primer, Genus)) %>% 
   filter(!duplicated(dup)) %>% #remove any duplicates
   dplyr::select(-dup) %>%
-  mutate(dir = case_when(
-    primer %in% unique(primers %>% filter(strand=="F") %>% pull(name)) ~ "Forward",
-    primer %in% unique(primers %>% filter(strand=="R") %>% pull(name)) ~ "Reverse"
-    ))  
-
-write_csv(summaries, "primer_evaluation/mismatch_summary.csv")
-R.utils::gzip("primer_evaluation/mismatch_summary.csv")
-
-summaries <- vroom::vroom("primer_evaluation/mismatch_summary.csv.gz", delim = ",") %>%
-  dplyr::select(-dir) %>%
-  mutate(primer = primer %>% str_remove(".gz$")) %>%
   left_join(primers %>%
             dplyr::select(primer = name, strand))
+
+#vroom::vroom_write(genus_summaries, "primer_evaluation/mismatch_summary.csv.gz",delim = ",")
+
+genus_summaries <- vroom::vroom("primer_evaluation/mismatch_summary.csv.gz",delim = ",")
 
 # Arrange on tree
 tree <- ape::read.tree("reference/trees/ultrametric_insecta_tree_order_constrained.nwk")
 
 # Filter summaries to just those in tree
-summaries <- summaries %>% 
+genus_summaries <- genus_summaries %>% 
   dplyr::filter(Genus %in% (tree$tip.label %>% 
   str_remove("^.*\\|") %>%
   str_extract("^.+?(?=_)") %>%
@@ -1234,7 +1361,7 @@ tips_to_keep <- tree$tip.label %>%
   enframe() %>% 
   tidyr::separate(value, into=c("acc", "Species"), sep="\\|") %>%
   left_join(lineage, by="acc") %>%
-  filter(Genus %in% (summaries %>% pull(Genus))) %>%
+  filter(Genus %in% (genus_summaries %>% pull(Genus))) %>%
   group_by(Genus) %>%
   dplyr::slice(1) %>%
   ungroup() %>%
@@ -1242,80 +1369,83 @@ tips_to_keep <- tree$tip.label %>%
 
 
 #Get subtree of only genera
-tree  <- castor::get_subtree_with_tips(tree,
+genus_tree  <- castor::get_subtree_with_tips(tree,
                                           only_tips = tips_to_keep$tips,
                                           collapse_monofurcations=TRUE,
                                           force_keep_root=TRUE)$subtree
 
 #Prune names to genus
-tree$tip.label <- tree$tip.label %>% 
+genus_tree$tip.label <- genus_tree$tip.label %>% 
   str_remove("^.*\\|") %>%
   str_extract("^.+?(?=_)")
 
 #Prune again to ensure matching tips
-tree <- castor::get_subtree_with_tips(tree,
-                                          only_tips = tree$tip.label[tree$tip.label %in% summaries$Genus],
+genus_tree <- castor::get_subtree_with_tips(genus_tree,
+                                          only_tips = genus_tree$tip.label[genus_tree$tip.label %in% genus_summaries$Genus],
                                           collapse_monofurcations=TRUE,
                                           force_keep_root=TRUE)$subtree
 
-Ntips 	<- length(tree$tip.label)
-Nnodes 	<- tree$Nnode
-cat(sprintf("Tree has %d nodes, %d tips and %d edges\n",Nnodes,Ntips,nrow(tree$edge)));
-
-# Root on Archaeognatha
-#tips_to_keep %>%
-#  filter(Order == "Archaeognatha" ) %>%
-#  filter(Genus == "Machilis") %>%
-#  pull(tips)
-#tree <- root_via_outgroup(tree, outgroup="Machilis", update_indices = TRUE)
+Ntips 	<- length(genus_tree$tip.label)
+Nnodes 	<- genus_tree$Nnode
+cat(sprintf("Tree has %d nodes, %d tips and %d edges\n",Nnodes,Ntips,nrow(genus_tree$edge)));
 
 # create internal node labels
-tree$node.label <- NA
-if(is.na(tree$node.label)){
+genus_tree$node.label <- NA
+if(is.na(genus_tree$node.label)){
 	cat(sprintf("Adding node labels to full tree..\n"))
-	tree$node.label = paste("node.", 1:Nnodes, sep = "") # don't use underscores, because some tree readers (e.g. rncl) interpret them as spaces
+	genus_tree$node.label = paste("node.", 1:Nnodes, sep = "") # don't use underscores, because some tree readers (e.g. rncl) interpret them as spaces
 }
 
 # replace zero-length edges
-if(any(tree$edge.length==0)){
-  epsilon = 0.1*min(tree$edge.length[tree$edge.length>0])
+if(any(genus_tree$edge.length==0)){
+  epsilon = 0.1*min(genus_tree$edge.length[genus_tree$edge.length>0])
 	cat(sprintf("Note: Some edges have length zero, which may break some of the HSP routines. Replacing zero-lengths with a tiny positive length (%g)..\n",epsilon))
-	tree$edge.length[tree$edge.length==0] = epsilon
+	genus_tree$edge.length[genus_tree$edge.length==0] = epsilon
 }
 
 
 ## Get values for higher nodes with castor
-uprimers <- unique(summaries$primer)
+uprimers <- unique(genus_summaries$primer)
 p_weights <- vector("list", length=length(uprimers))
+names(p_weights) <- uprimers
+
 for (i in 1:length(uprimers)){
   print(paste0("Processing Primer ",i, " of ", length(uprimers), ": ", uprimers[i]))
-  tip_states <- summaries %>%
+  tip_states <- genus_summaries %>%
     dplyr::filter(primer==uprimers[i], Genus %in% tips_to_keep$Genus) %>%
-    group_by(Genus) %>%
-    summarise(values = mean(sum, na.rm=TRUE))%>%
-    ungroup() %>%
+    #group_by(Genus) %>%
+    #summarise(values = mean(sum, na.rm=TRUE))%>%
+    #ungroup() %>%
+    dplyr::rename(values = sum) %>%
     column_to_rownames("Genus")
     
-  row2tip <- match(rownames(tip_states), tree$tip.label)
+  row2tip <- match(rownames(tip_states), genus_tree$tip.label)
   
   #find non matching
   rownames(tip_states)[is.na(row2tip)]
   
   tip_states <- tip_states[!is.na(row2tip),,drop = FALSE]
-  hsp_states <- castor::hsp_independent_contrasts(tree = tree,
+  hsp_states <- castor::hsp_independent_contrasts(tree = genus_tree,
                                               tip_states = tip_states$values,
                                               weighted = TRUE,
                                               check_input = TRUE)$states
   
+  # Get distance of each tip to tips that have data
+  target_tips <- match(tip_states %>% filter(!is.na(values)) %>% rownames(), genus_tree$tip.label);
+  tip_dist <- castor::find_nearest_tips(genus_tree, only_descending_tips=FALSE, 
+                                        target_tips=target_tips, as_edge_counts=FALSE, check_input=TRUE)
+  
    p_weights[[i]] <- tip_states %>%
     rownames_to_column("Genus") %>%
-    mutate(hsp = hsp_states[1:Ntips])
+    mutate(hsp = hsp_states[1:Ntips],
+           tip_dist =tip_dist$nearest_distance_per_tip[1:Ntips])
 }
-names(p_weights) <- uprimers
 
-imputed <- summaries %>%
+imputed <- genus_summaries %>%
     left_join(bind_rows(p_weights,.id = "primer"), 
-               by = c("primer", "Genus")) %>%
+               by = c("primer", "Genus", "tax_id", "strand")) %>%
+  left_join(primers %>%
+            dplyr::select(primer = name, degeneracy))%>%
   filter(!is.na(hsp))
 
 primer_orders <- imputed %>%
@@ -1323,10 +1453,8 @@ primer_orders <- imputed %>%
   dplyr::summarise(hsp = mean(hsp, na.rm=TRUE), sum = mean(sum, na.rm=TRUE)) %>%
   arrange(hsp)
 
-
 # Plot tree
-
-p1 <- ggtree(tree , ladderize=TRUE, aes(colour=values))
+p1 <- ggtree(genus_tree , ladderize=TRUE, aes(colour=values))
 
 weights_p1 <- p1$data %>%
   left_join(imputed %>%
@@ -1343,7 +1471,7 @@ names(tip_states) <- weights_p1 %>%
   dplyr::filter(isTip) %>%
   pull(label)
 
-weights_p1$values[!weights_p1$isTip] <- castor::asr_independent_contrasts(tree=tree,
+weights_p1$values[!weights_p1$isTip] <- castor::asr_independent_contrasts(tree=genus_tree,
                                                         tip_states=tip_states)$ancestral_states
 
 p2 <- p1 %<+% weights_p1 +
@@ -1357,7 +1485,7 @@ p2 <- p1 %<+% weights_p1 +
 tax_groups <- tips_to_keep %>%
   dplyr::rename(label = Genus) %>%
   select(label, Order) %>%
-  filter(label %in% tree$tip.label) %>%
+  filter(label %in% genus_tree$tip.label) %>%
   group_by(Order) 
 
 group_name <- group_keys(tax_groups)  %>%
@@ -1373,14 +1501,14 @@ cls <- tax_groups %>%
       dplyr::filter(label %in% query)
     quants <- labs  %>% 
       dplyr::filter(between(y, left=quantile(labs$y,  probs =0.1), right=quantile(labs$y,  probs =0.90)))
-    mrca_node <- get_mrca_of_set(tree, quants$label)
+    mrca_node <- get_mrca_of_set(genus_tree, quants$label)
     
     if(mrca_node > Ntips){
       subset_node <- mrca_node-Ntips
     } else{
       subset_node <- mrca_node
     }
-    subset_tree <- get_subtree_at_node(tree, subset_node)$subtree
+    subset_tree <- get_subtree_at_node(genus_tree, subset_node)$subtree
     print(length(subset_tree$tip.label))
     
     # Only label the bigger ones
@@ -1398,9 +1526,6 @@ cls <- cls[!sapply(cls, is.null)]
 colourCount = length(cls)
 getPalette = colorRampPalette(brewer.pal(12, "Paired"))
 colour.pal <- getPalette(colourCount)
-
-# clade label offset
-offsets <- seq(0, length(cls), .5)
 
 p3 <- p2
 for(i in 1:length(cls)){
@@ -1420,10 +1545,10 @@ gg.mismatch <- imputed %>%
     facet_grid(~strand, scales="free", space="free", drop=TRUE) +
     #theme_classic() + 
     theme(
-      axis.text.x = element_text(angle = 45, hjust = 1),
+      axis.text.x = element_blank(),
+      axis.ticks = element_blank(),
       axis.text.y = element_blank(),
-      axis.ticks.y = element_blank(),
-      axis.title.y = element_blank(),
+      axis.title = element_blank(),
       strip.text.y = element_text(angle = 0),
       #strip.background = element_rect(fill="grey10"),
       legend.position = "none"
@@ -1446,20 +1571,179 @@ gg.density <- imputed %>%
   theme(legend.position = "none")+
   coord_flip()
 
+# plot tip dist (missing data), mean mismatch, evenness of mismatch, and degeneracy
+library(DescTools)
 
-Fig5 <- p3 + gg.mismatch + gg.density + plot_layout(widths = c(1,3,0.25))
+gg.primer_stats <- imputed %>%
+   mutate(primer = factor(primer, levels=primer_orders$primer)) %>%     
+  group_by(primer, strand) %>%
+  summarise(
+    tip_dist = mean(tip_dist),
+    mean_mismatch = mean(hsp, na.rm=TRUE),
+    gini_mismatch = Gini(hsp),
+    degeneracy = mean(degeneracy)
+    ) %>%
+  pivot_longer(3:6, 
+               names_to="measure",
+               values_to="value") %>%
+  mutate(measure = factor(measure, levels = c("mean_mismatch", "gini_mismatch", "degeneracy", "tip_dist"))) %>%
+  ggplot(aes(x = primer, y = value, fill=value)) +
+    geom_col() +
+    scale_fill_gradient(low = "darkslateblue", high = "firebrick", na.value = "grey", oob = scales::squish) +
+    facet_grid(measure~strand, scales="free", drop=TRUE) +
+  base_theme+
+    theme(
+      #axis.text.y = element_blank(),
+      #axis.ticks.y = element_blank(),
+      axis.title.y = element_blank(),
+      strip.text = element_blank(),
+      #strip.text.y = element_text(angle=0),
+      #strip.background = element_rect(fill="grey10"),
+      legend.position = "none"
+    ) + 
+  scale_y_continuous(expand=c(0,0))+ 
+  scale_x_discrete(expand=c(0,0))
+
+Fig5a <- p3 + gg.mismatch + gg.density + plot_layout(widths = c(1,3,0.25))
+Fig5b <- plot_spacer() + gg.primer_stats + plot_spacer() + plot_layout(widths = c(1,3,0.25))
+
+Fig5 <- Fig5a / Fig5b + plot_layout(heights = c(7, 1))
 
 pdf(file="fig/Fig5_mismatch.pdf", width = 8, height = 11 , paper="a4")
   plot(Fig5)
 try(dev.off(), silent=TRUE)
  
-#- Add a summary metric for mean mismatch for each primer
-#- Add a summary metric for evennes of mismatch for each primer
-#- Add a summary metric for amount of missing data imputed. Is there a way to highlight what data was imputed or not?
-#- Add a metric for amount of degeneracy in each primer
+```
+# Could put the autocorrelation function below the tree on the left
   
 # Calculate phylogenetic signal
+
+
+
+# Autocorrelation
+```{r autocrrelation}
+
+tree <- ape::read.tree("reference/trees/ultrametric_insecta_tree_order_constrained.nwk")
+
+primer_mismatch <- vroom::vroom("primer_evaluation/mismatch_all.csv.gz",delim = ",") %>% 
+  mutate(Acc = Acc %>% str_remove("\\|.*$") %>%
+           acc2hex()) %>%
+  mutate(tips = paste0(Acc, "|", Species)) %>%
+  select(primer, tips, values = sum)
+
+
+uprimers <- unique(primer_mismatch$primer)
+acfvec <- vector("list", length=length(uprimers))
+names(acfvec) <- uprimers
+
+i=1
+for (i in 1:length(uprimers)){
+  weights <- tree$tip.label %>% 
+      enframe() %>% 
+      select(-name, tips = value) %>%
+        left_join(primer_mismatch %>%
+                    filter(primer == uprimers[i]))%>%
+      filter(!is.na(values))
+
+
+  # Subset to only those with known states
+  subset_tree <- get_subtree_with_tips(tree, weights$tips)$subtree
+        print(length(subset_tree$tip.label))
+  message(length(subset_tree$tip.label), " tips with known states kept for ", uprimers[i])
+
+  # Get tip states
+  tip_states <- weights %>%
+    dplyr::pull(values)
+  names(tip_states) <- weights %>%
+    dplyr::pull(tips)
   
+  # Autocorrelation funciton
+  acf <- castor::get_trait_acf(subset_tree, tip_states, Npairs=1e9, Nbins=100)
+  
+  # Trait depth
+  #tip_states_binary <- tip_states
+  #tip_states_binary[tip_states_binary >0] <- 1
+  #consentrait <- get_trait_depth(subset_tree, tip_states_binary, count_singletons=FALSE, weighted=TRUE, Npermutations = 1000)
+  
+  # Create output data frame
+  acfvec[[i]] <- data.frame(
+    distances = acf$distances,
+    acf_acf = acf$autocorrelations,
+    acf_mean_abs = acf$mean_abs_differences,
+    acf_mean_rel = acf$mean_rel_differences,
+    acf_npairs = acf$Npairs_per_distance
+    #,
+    #trait_mean = consentrait$mean_depth,
+    #trait_std = sqrt(consentrait$var_depth),
+    #trait_n = consentrait$Npositives,
+    #trait_p = consentrait$P
+    )
+}
+
+acf <- acfvec %>%
+  bind_rows(.id="primer")
+
+vroom::vroom_write(acf, "primer_evaluation/acf_mismatch.csv.gz",delim = ",")
+
+acf <- vroom::vroom("primer_evaluation/acf_mismatch.csv.gz") %>%
+    filter(acf_npairs > 0) 
+
+gg.all_acf <- acf %>%
+  select(-acf_npairs) %>%
+  group_by(primer) %>%
+  pivot_longer(starts_with("acf_"),
+               names_to="type",
+               values_to="value") %>%
+ filter(type == "acf_acf") %>%
+ggplot(aes(x = distances, y=value, group= primer)) +
+  geom_line(alpha=0.1, colour="black") +
+  base_theme #+
+ # facet_wrap(~primer, scales = "free_y")
+
+gg.all_acf
+
+pdf(file="fig/supplementary/all_acf.pdf", width = 8, height = 11 , paper="a4")
+  plot(gg.all_acf)
+try(dev.off(), silent=TRUE)
+
+# Mean Autocorrelation across all primers
+tree <- ape::read.tree("reference/trees/ultrametric_insecta_tree_order_constrained.nwk")
+
+primer_mismatch <- vroom::vroom("primer_evaluation/mismatch_all.csv.gz",delim = ",") %>% 
+  mutate(Acc = Acc %>% str_remove("\\|.*$") %>%
+           acc2hex()) %>%
+  mutate(tips = paste0(Acc, "|", Species)) %>%
+  select(primer, tips, values = sum) %>%
+  group_by(tips) %>%
+  summarise(values = mean(values, na.rm=TRUE))
+            
+weights <- tree$tip.label %>% 
+    enframe() %>% 
+    select(-name, tips = value) %>%
+      left_join(primer_mismatch ) %>%
+    filter(!is.na(values))
+
+# Subset to only those with known states
+subset_tree <- get_subtree_with_tips(tree, weights$tips)$subtree
+print(length(subset_tree$tip.label))
+
+# Get tip states
+tip_states <- weights %>%
+  dplyr::pull(values)
+names(tip_states) <- weights %>%
+  dplyr::pull(tips)
+
+# Autocorrelation funciton
+acf_mean <- castor::get_trait_acf(subset_tree, tip_states, Npairs=1e8, Nbins=100)
+  
+# Create output data frame
+data.frame(
+    distances = acf_mean$distances,
+    acf_acf = acf_mean$autocorrelations) %>%
+ggplot(aes(x = distances, y=acf_acf)) +
+  geom_line() +
+  base_theme
+
 
 ```
 
