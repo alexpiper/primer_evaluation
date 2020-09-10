@@ -580,7 +580,7 @@ gg.primers <- ggplot(data=ent_smoothed[ent_smoothed$pos==1,], aes(x = as.numeric
 
 gg.primers
 
-Fig3 <- gg.box / gg.primers / gg.sequences + plot_layout(heights= c(3, 3, 0.5))  +  plot_annotation(tag_levels = 'A') 
+Fig3 <- gg.entropy / gg.primers / gg.sequences + plot_layout(heights= c(3, 3, 0.5))  +  plot_annotation(tag_levels = 'A') 
 
 Fig3
 
@@ -600,25 +600,29 @@ sw <- function(x, width, interval = 1){
 }
 
 ent_sw <- ent %>%
-  group_by(names) %>%
-  mutate(sw220 = sw(ent, width=220, interval = 1)/220) %>%
-  mutate(sw420 = sw(ent, width=420, interval = 1)/420) %>%
-  mutate(sw20 = sw(ent, width=20, interval = 1)/20) %>% #For primers
+  dplyr::rename(Order = names) %>%
+  ungroup()%>%
+  group_by(pos) %>%
+  summarise(ent = mean(ent)) %>%
+  mutate(sw100 = sw(ent, width=100, interval = 1)/100) %>%
+  mutate(sw200 = sw(ent, width=200, interval = 1)/200) %>%
+  mutate(sw300 = sw(ent, width=300, interval = 1)/300) %>%
+  mutate(sw400 = sw(ent, width=400, interval = 1)/400) %>%
+  #mutate(sw20 = sw(ent, width=20, interval = 1)/20) %>% #For primers
   ungroup()%>%
   pivot_longer(starts_with("sw"),
                names_to = "windowsize",
                values_to = "sw") 
 
-gg.density <-  ent_sw %>%
-  dplyr::rename(Order = names) %>%
-  mutate(Order = case_when(
-     Order %in% c("Coleoptera", "Diptera", "Hemiptera", "Hymenoptera", "Lepidoptera") ~ Order,
-    !Order %in% c("Coleoptera", "Diptera", "Hemiptera", "Hymenoptera", "Lepidoptera") ~ "Other"
-    )) %>%
+gg.swent <-  ent_sw %>%
+ #mutate(Order = case_when(
+ #   Order %in% c("Coleoptera", "Diptera", "Hemiptera", "Hymenoptera", "Lepidoptera") ~ Order,
+ #  !Order %in% c("Coleoptera", "Diptera", "Hemiptera", "Hymenoptera", "Lepidoptera") ~ "Other"
+ #  )) %>%
   ggplot(aes(x = pos, y=1)) +
     geom_tile(aes(fill=sw))+
     scale_fill_viridis_c(option="plasma") + 
-  facet_wrap(windowsize~Order, ncol=1, strip.position ="right") +
+  facet_wrap(windowsize~., ncol=1, strip.position ="right") +
   scale_x_continuous(limits = c(0, 712), breaks=seq(0,700,50), expand=c(0,0))  +
   theme_void() +
   theme(legend.position = "bottom",
@@ -626,22 +630,155 @@ gg.density <-  ent_sw %>%
         axis.ticks.y = element_blank(),
         axis.title.y = element_blank())
 
-gg.density
+gg.swent
  
+Fig3 <- gg.entropy / gg.primers / gg.sequences / gg.swline + plot_layout(heights= c(3, 3, 0.5, 2)) 
 
+Fig3
+
+
+#
+
+gg.swline <-  ent_sw %>%
+ # mutate(sw = replace_na(sw, 0)) %>%
+ #mutate(Order = case_when(
+ #   Order %in% c("Coleoptera", "Diptera", "Hemiptera", "Hymenoptera", "Lepidoptera") ~ Order,
+ #  !Order %in% c("Coleoptera", "Diptera", "Hemiptera", "Hymenoptera", "Lepidoptera") ~ "Other"
+ #  )) %>%
+  ggplot(aes(x = pos, y=sw)) +
+  geom_line()+
+  facet_wrap(windowsize~., ncol=1, strip.position ="right") +
+  scale_x_continuous(limits = c(0, 712), breaks=seq(0,700,50), expand=c(0,0))  +
+  theme_void() +
+  theme(legend.position = "bottom",
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.y = element_blank())
+
+gg.swline
+ 
 ```
 
-# Identification sucess
+# Sliding window
 
-In order to evaluate the taxonomic resolution of different barcode regions, alignments were trimmed to primer regions using the in silico PCR function from the insect package and  the identificaiton sucess functions from the SPIDER r package were used
+## Sliding window PCR
+```{r}
 
-Metrics to evaluate primers on:
- *  OTU clustering of each primer at different ranks, see drop off
- *  OTU clustering, subset to pests only (ie fraction of pests in their own cluster)
- *  Datasets subset to pest genera (or families), evaluated with spider nearNeighbour, BestCloseMatch, ThreshID, Monophyly
- * Leave one out BLAST/RDP?
- * P(LCR) for each primer?
+# Load seqs
+seqs <- readDNAStringSet("reference/merged_final.fa.gz")
+seqs <- seqs[lengths(seqs)==712]
+# Sliding window
+alignment_sw <- function(x, width, interval = 1, maxgaps=0){
+  alignment_width <- max(width(x))
+  win <- seq(1,  alignment_width - width, by = interval) #Get all possible windows
+  out <- vector("list", length=length(win))
+  for(i in 1:length(win)){
+    amplicon <- Biostrings::subseq(x, start=win[i], end = win[i]+width) #may need to add 1 to start
+    rem <- names(amplicon)[Biostrings::letterFrequency(amplicon, "-") > maxgaps]
+    amplicon <- amplicon[!names(amplicon) %in% rem]
+    out[[i]] <- amplicon
+  }
+  names(out) <- paste(win, win+width, sep="-")
+  return(out)
+}
+
+# Make 100bp windows
+dir.create("primer_evaluation/amplicons/win100/")
+alignment_sw(seqs, width=100, interval=3, maxgaps=9) %>%
+  purrr::map2(., names(.), ~Biostrings::writeXStringSet(.x, file=paste0("primer_evaluation/amplicons/win100/", .y,".fa.gz"), compress=TRUE))
+
+# Make 200bp windows
+dir.create("primer_evaluation/amplicons/win200/")
+alignment_sw(seqs, width=200, interval=3, maxgaps=9) %>%
+  purrr::map2(., names(.), ~Biostrings::writeXStringSet(.x, file=paste0("primer_evaluation/amplicons/win200/", .y,".fa.gz"), compress=TRUE))
+
+# Make 300bp windows
+dir.create("primer_evaluation/amplicons/win300/")
+alignment_sw(seqs, width=300, interval=3, maxgaps=9) %>%
+  purrr::map2(., names(.), ~Biostrings::writeXStringSet(.x, file=paste0("primer_evaluation/amplicons/win300/", .y,".fa.gz"), compress=TRUE))
+
+# Make 400bp windows
+dir.create("primer_evaluation/amplicons/win400/")
+alignment_sw(seqs, width=400, interval=3, maxgaps=9) %>%
+  purrr::map2(., names(.), ~Biostrings::writeXStringSet(.x, file=paste0("primer_evaluation/amplicons/win400/", .y,".fa.gz"), compress=TRUE))
+
+```
  
+ 
+## USEARCH distance matrix
+
+```{bash generate job index}
+#!/bin/bash
+dos2unix bash/usearch_distmat.sh
+/usr/bin/ls -d /group/pathogens/Alexp/Metabarcoding/primer_evaluation/primer_evaluation/amplicons/win*/* | sed -e '1p' -e '/.fa.gz/!d' | sort -u > job_index.txt
+njobs=$(cat job_index.txt | wc -l)
+sbatch --array=1-$njobs bash/usearch_distmat.sh
+```
+
+
+# ID Success SW
+
+```{r analyse uclust}
+# Summarise number of mixed clusters that contain pests at %
+pestlist <- read_csv("primer_evaluation/pestlist.csv") 
+
+# Get mixed clusters
+library(furrr)
+plan(multiprocess, workers=8)
+sw_clusters <- c(fs::dir_ls(path="primer_evaluation/amplicons/win100/usearch_output/", glob = "*.txt.gz"),
+                    fs::dir_ls(path="primer_evaluation/amplicons/win200/usearch_output/", glob = "*.txt.gz"),
+                    fs::dir_ls(path="primer_evaluation/amplicons/win300/usearch_output/", glob = "*.txt.gz"),
+                    fs::dir_ls(path="primer_evaluation/amplicons/win400/usearch_output/", glob = "*.txt.gz")) %>%
+  furrr::future_map(function(x){
+  #purrr::map(function(x){
+  vroom::vroom(x, delim="\t", col_names = c("acc1", "acc2", "dist")) %>%
+    dplyr::mutate(spp1 = acc1 %>%
+                    str_remove(";$") %>%
+                    str_remove("^.*;"),
+                  acc1 = acc1 %>% str_remove(";.*$"),
+                  spp2 = acc2 %>%
+                    str_remove(";$") %>%
+                    str_remove("^.*;"),
+                  acc2 = acc2 %>% str_remove(";.*$"),
+                  dist = round(dist, 2)) %>%
+    dplyr::filter(!spp1==spp2)%>%
+        dplyr::group_by(dist) %>% 
+        dplyr::summarise(mixed=n_distinct(spp1))
+  })%>%
+  bind_rows(.id="source") %>%
+  mutate(source = str_remove(basename(source), ".txt.gz")) %>%
+  mutate(win_start = source %>% str_remove("-.*$")  %>% as.numeric(),
+         win_end = source %>% str_remove("^.*-") %>% as.numeric()) %>%
+  mutate(win_length = win_end - win_start)
+  
+#Get amplified
+amplified <-c(fs::dir_ls(path="primer_evaluation/amplicons/win100/", glob = "*.fa.gz"),
+                    fs::dir_ls(path="primer_evaluation/amplicons/win200/", glob = "*.fa.gz"),
+                    fs::dir_ls(path="primer_evaluation/amplicons/win300/", glob = "*.fa.gz"),
+                    fs::dir_ls(path="primer_evaluation/amplicons/win400/", glob = "*.fa.gz")) %>%
+   purrr::map(function(x){
+   #furrr::future_map(function(x){
+     fasta.index(x) %>%
+        mutate(species = desc %>% 
+                 str_remove("(?:[^;]*;){7}") %>% #match 7th ;
+                 str_remove(";$"))  %>%
+      dplyr::group_by(filepath) %>%
+      dplyr::summarise(seqs_amplified = n(), spp_amplified = n_distinct(species)) 
+   }) %>%
+  bind_rows() %>%
+  mutate(source = str_remove(basename(filepath), ".fa.gz")) %>%
+  dplyr::select(-filepath)
+
+sw_joint <- sw_clusters %>%
+  left_join(amplified) %>%
+  mutate(combos = source) %>% 
+  tidyr::separate(source, into=c("Fname", "Rname"), sep="_", extra="merge")
+
+vroom::vroom_write(sw_joint, "primer_evaluation/amplicons/sw_clusters_summary.csv", delim=",")
+```
+
+
+# ID Success by primer
  
 ## Virtual PCR
 
@@ -697,20 +834,21 @@ li <- foreach(p=1:nrow(combos)) %dopar% {
 }
 #close cluster
 parallel::stopCluster(cl)
-
 ```
- 
-### USEARCH distance matrix
+
+
+## USEARCH distance matrix
 
 ```{bash generate job index}
 #!/bin/bash
 dos2unix bash/usearch_distmat.sh
 /usr/bin/ls -d /group/pathogens/Alexp/Metabarcoding/primer_evaluation/primer_evaluation/amplicons/* | sed -e '1p' -e '/.fa.gz/!d' | sort -u > job_index.txt
+/usr/bin/ls -d /group/pathogens/Alexp/Metabarcoding/primer_evaluation/primer_evaluation/amplicons/win*/* | sed -e '1p' -e '/.fa.gz/!d' | sort -u > job_index.txt
 njobs=$(cat job_index.txt | wc -l)
 sbatch --array=1-$njobs bash/usearch_distmat.sh
 ```
 
-## Figure 4 - ID success
+## Figure 4 - ID success for different primers
 
 ```{r analyse uclust}
 # Summarise number of mixed clusters that contain pests at %
@@ -1062,13 +1200,7 @@ for(i in 1:length(thresholds)){
   
   weights_p1$values[!weights_p1$isTip] <- castor::asr_independent_contrasts(tree=genus_tree,
                                                           tip_states=tip_states, check_input = FALSE)$ancestral_states
-#
-  #weights_p1 <- weights_p1 %>%
-  #  mutate(highlight = case_when(
-  #    isTip & values > 0 ~ 5, #Set to max
-  #    TRUE ~ as.numeric(NA)
-  #  ))
-  #
+
   p2 <- p1 %<+% weights_p1 +
     scale_color_gradient(low="darkslateblue", high="firebrick",na.value = NA, limits = c(0,5), oob = scales::squish) +
     #geom_tippoint(aes(colour=highlight), size=.5) +
@@ -1139,17 +1271,6 @@ for(i in 1:length(thresholds)){
 
 }
 
-Fig4a <- plotvec[[1]] / plotvec[[2]] / plotvec[[3]] / plotvec[[4]]
-
-Fig4 <- Fig4a - gg.id
-
-Fig4
-
-pdf(file="fig/Fig4_id_success.pdf", width = 8, height = 11 , paper="a4")
-  plot(Fig4)
-try(dev.off(), silent=TRUE)
-  
-  
 # Autocorrelation
 tree <- ape::read.tree("reference/trees/ultrametric_insecta_tree_order_constrained.nwk")
 
@@ -1169,36 +1290,31 @@ folmer_id_spp <- vroom::vroom("primer_evaluation/amplicons/usearch_output/LCO149
     filter(threshold %in% c(0.97, 0.98,0.99,1)) %>%
     dplyr::filter(!spp1==spp2)%>%
     dplyr::group_by(threshold, spp1) %>% 
-    dplyr::summarise(mixed=n_distinct(spp2)) %>%
+    dplyr::summarise(mixed=n_distinct(spp2), acc1) %>%
     ungroup() %>%
-  mutate(species = spp1 %>% str_replace_all(" ", "_")) %>%
-  select(threshold, species, values = mixed)
-
-# Prune tree to genus
-tree$tip.label <- tree$tip.label %>% 
-  enframe() %>% 
-  tidyr::separate(value, into=c("acc", "Species"), sep="\\|") %>%
-  left_join(lineage, by="acc") %>%
-  pull(Species)
+  mutate(tips = paste0(acc1 %>% str_remove("\\|.*$") %>% acc2hex(.), "|", spp1 %>% str_replace_all(" ", "_"))) %>%
+  select(threshold, tips, values = mixed)
 
 thresholds <- unique(folmer_id_spp$threshold)
 acfvec <- vector("list", length = length(thresholds))
 names(acfvec) <- thresholds
+traitvec <- vector("list", length = length(thresholds))
+names(traitvec) <- thresholds
 
 i=1
 for(i in 1:length(thresholds)){
   weights <- tree$tip.label %>% 
     enframe() %>% 
-    select(-name, species = value) %>%
+    select(-name, tips = value) %>%
       left_join(folmer_id_spp %>% 
                   filter(threshold == thresholds[i]) %>%
-                  select(-threshold))%>%
-      mutate(values = values %>% replace_na(0))
-                
+                  select(-threshold)) %>%
+     mutate(values = replace_na(values, 0))
+  
   tip_states <- weights %>%
     dplyr::pull(values)
   names(tip_states) <- weights %>%
-    dplyr::pull(species)
+    dplyr::pull(tips)
   
   # Autocorrelation funciton
   acf <- castor::get_trait_acf(tree, tip_states, Npairs=1e8, Nbins=100)
@@ -1206,7 +1322,9 @@ for(i in 1:length(thresholds)){
   # Trait depth
   tip_states_binary <- tip_states
   tip_states_binary[tip_states_binary >0] <- 1
-  consentrait <- get_trait_depth(tree, tip_states_binary, count_singletons=FALSE, weighted=TRUE, Npermutations = 1000)
+  consentrait <- get_trait_depth(tree, tip_states_binary,
+                                 min_fraction = 0.9, #90% of clade must be insufficiently ID'd to be problmeatic
+                                 count_singletons=TRUE, weighted=FALSE, Npermutations = 1000)
   
   # Create output data frame
   acfvec[[i]] <- data.frame(
@@ -1214,12 +1332,15 @@ for(i in 1:length(thresholds)){
     acf_acf = acf$autocorrelations,
     acf_mean_abs = acf$mean_abs_differences,
     acf_mean_rel = acf$mean_rel_differences,
-    acf_npairs = acf$Npairs_per_distance,
-    trait_mean = consentrait$mean_depth,
-    trait_std = sqrt(consentrait$var_depth),
-    trait_n = consentrait$Npositives,
-    trait_p = consentrait$P
-    )
+    acf_npairs = acf$Npairs_per_distance)
+  
+  pos_clades <- consentrait$positive_clades
+  traitvec[[i]] <-  data.frame(
+    pos_clade_id = pos_clades,
+    traits_per_pos_clades = consentrait$positives_per_clade[pos_clades],
+    mean_depth_pos_clades = consentrait$mean_depth_per_clade[pos_clades]
+  )
+
 }
 
 acf <- acfvec %>%
@@ -1229,11 +1350,80 @@ acf <- acfvec %>%
                names_to="type",
                values_to="value")
 
-ggplot(acf, aes(x = distances, y=value)) +
+
+
+gg.acf <- acf %>% 
+  filter(type == "acf_acf", distances < 16) %>%
+  ggplot(aes(x = distances, y=value)) +
   geom_line() +
-  facet_grid(type~threshold, scales="free_y")
+  base_theme+
+  facet_grid(threshold~.) +
+  theme(legend.position = "none") + 
+  labs(x="Phylogenetic distance",
+       y="Pearson correlation") +
+  scale_y_continuous(labels = scales::percent) #+
+  #theme(panel.grid.minor = element_blank())
+
+gg.acf
 
 
+# Consentrait metric - should this go on the plot?
+bad_clades <- traitvec %>%
+  bind_rows(.id="threshold")
+
+#clade labels
+bad_clades_labels <- bad_clades %>%
+  group_by(threshold) %>%
+  arrange(desc(traits_per_pos_clades),desc(mean_depth_pos_clades), .by_group = TRUE) %>%
+  rownames_to_column("rank") %>%
+  mutate(rank = as.numeric(rank)) %>%
+    top_n(-5, rank) %>%
+    #top_frac(-.001, rank) %>%
+  mutate(subtree_taxonomy = map(pos_clade_id,function(x){
+    subtree <- castor::get_subtree_at_node(tree, x-Ntip(tree))$subtree
+    taxonomy <- subtree$tip.label %>%
+      enframe() %>%
+      mutate(acc= value %>% str_remove("\\|.*$"))%>%
+      left_join(lineage, by="acc")
+    names(which.max(table(taxonomy$Family)))
+  }))%>% 
+  unnest(subtree_taxonomy) %>%
+  filter(!duplicated(subtree_taxonomy))
+
+library(ggrepel)
+
+gg.bad_clades <- bad_clades %>% 
+  ggplot(aes(x= mean_depth_pos_clades, y=traits_per_pos_clades)) + 
+  geom_point(alpha=0.1) + 
+  geom_point(data = bad_clades_labels, aes(x=mean_depth_pos_clades, y=traits_per_pos_clades), colour="red")+
+  geom_text_repel(data = bad_clades_labels, aes(x=mean_depth_pos_clades, y=traits_per_pos_clades, label= subtree_taxonomy), colour="red")+
+  scale_y_log10()+
+  #scale_x_log10()+
+    facet_grid(threshold~.) +
+  base_theme+
+  theme(legend.position = "none") + 
+    labs(x="Mean phylogenetic depth",
+         y="Number of Failed ID's")
+
+# Or could pull out the positive clades, then get the descnedants for htem
+
+
+# Plot figure 4 
+Fig4a <- plotvec[[1]] / plotvec[[2]] / plotvec[[3]] / plotvec[[4]]
+
+Fig4 <- Fig4a - gg.id - (gg.acf + gg.bad_clades)
+
+Fig4
+
+pdf(file="fig/Fig4_id_success.pdf", width = 8, height = 11 , paper="a4")
+  plot(Fig4)
+try(dev.off(), silent=TRUE)
+
+  
+test1 <-  (gg.acf + gg.bad_clades)
+
+gg.id - test1 + plot_layout(widths=c(2,1))
+  
 #  Look at clade with the highest positives
 hist(consentrait$positives_per_clade)
 
@@ -1444,8 +1634,9 @@ for (i in 1:length(uprimers)){
 imputed <- genus_summaries %>%
     left_join(bind_rows(p_weights,.id = "primer"), 
                by = c("primer", "Genus", "tax_id", "strand")) %>%
+  select(-strand) %>%
   left_join(primers %>%
-            dplyr::select(primer = name, degeneracy))%>%
+            dplyr::select(primer = name, degeneracy, strand))%>%
   filter(!is.na(hsp))
 
 primer_orders <- imputed %>%
@@ -1529,7 +1720,7 @@ colour.pal <- getPalette(colourCount)
 
 p3 <- p2
 for(i in 1:length(cls)){
-p3 <- p3 + geom_cladelabel(node=cls[[i]], label=names(cls[i]), align=T, angle=270, hjust='center', offset.text=.25, barsize=1.5, color = colour.pal[[i]])
+p3 <- p3 + geom_cladelabel(node=cls[[i]], label=names(cls[i]), align=T, angle=270, hjust='center', offset.text=.5, barsize=1.5, color = colour.pal[[i]])
 }
 
 p3
@@ -1540,7 +1731,7 @@ gg.mismatch <- imputed %>%
   mutate( primer = factor(primer, levels=primer_orders$primer)) %>%     
   ggplot(aes(x = primer, y = y, fill = hsp)) +
     geom_raster() +
-    #scale_fill_distiller(palette = "Spectral", limits = c(0, 200)) +
+  #scale_fill_distiller(palette = 'RdYlBu', limits = c(0, 200), oob = scales::squish)+
     scale_fill_gradient(low = "darkslateblue", high = "firebrick", na.value = "grey", limits = c(0, 200), oob = scales::squish) +
     facet_grid(~strand, scales="free", space="free", drop=TRUE) +
     #theme_classic() + 
@@ -1587,28 +1778,31 @@ gg.primer_stats <- imputed %>%
                names_to="measure",
                values_to="value") %>%
   mutate(measure = factor(measure, levels = c("mean_mismatch", "gini_mismatch", "degeneracy", "tip_dist"))) %>%
-  ggplot(aes(x = primer, y = value, fill=value)) +
+  group_by(measure) %>%
+  mutate(cols = value) %>%
+  mutate_at(c("cols"),  ~ . / max(.) ) %>%
+  ggplot(aes(x = primer, y = value, fill=cols)) +
     geom_col() +
-    scale_fill_gradient(low = "darkslateblue", high = "firebrick", na.value = "grey", oob = scales::squish) +
-    facet_grid(measure~strand, scales="free", drop=TRUE) +
+    scale_fill_gradient(low = "darkslateblue", high = "firebrick", na.value = "grey",  oob = scales::squish) +
+    facet_grid(measure~strand, scales="free", switch="y", drop=TRUE) +
   base_theme+
     theme(
-      #axis.text.y = element_blank(),
-      #axis.ticks.y = element_blank(),
       axis.title.y = element_blank(),
-      strip.text = element_blank(),
-      #strip.text.y = element_text(angle=0),
-      #strip.background = element_rect(fill="grey10"),
+      axis.text.y = element_blank(),
+      axis.ticks.y = element_blank(),
+      strip.text.x = element_blank(),
+      strip.text.y = element_text(angle=0),
       legend.position = "none"
     ) + 
   scale_y_continuous(expand=c(0,0))+ 
   scale_x_discrete(expand=c(0,0))
 
-Fig5a <- p3 + gg.mismatch + gg.density + plot_layout(widths = c(1,3,0.25))
-Fig5b <- plot_spacer() + gg.primer_stats + plot_spacer() + plot_layout(widths = c(1,3,0.25))
+Fig5a <- p3 + gg.mismatch + gg.density + plot_layout(widths = c(1,4,0.25))
+Fig5b <- plot_spacer() + gg.primer_stats + plot_spacer() + plot_layout(widths = c(1,4,0.25))
 
 Fig5 <- Fig5a / Fig5b + plot_layout(heights = c(7, 1))
 
+Fig5
 pdf(file="fig/Fig5_mismatch.pdf", width = 8, height = 11 , paper="a4")
   plot(Fig5)
 try(dev.off(), silent=TRUE)
@@ -1618,9 +1812,7 @@ try(dev.off(), silent=TRUE)
   
 # Calculate phylogenetic signal
 
-
-
-# Autocorrelation
+# ACF Mismatch
 ```{r autocrrelation}
 
 tree <- ape::read.tree("reference/trees/ultrametric_insecta_tree_order_constrained.nwk")
@@ -1658,7 +1850,7 @@ for (i in 1:length(uprimers)){
     dplyr::pull(tips)
   
   # Autocorrelation funciton
-  acf <- castor::get_trait_acf(subset_tree, tip_states, Npairs=1e9, Nbins=100)
+  acf <- castor::get_trait_acf(subset_tree, tip_states, Npairs=1e8, Nbins=100)
   
   # Trait depth
   #tip_states_binary <- tip_states
@@ -1705,46 +1897,6 @@ gg.all_acf
 pdf(file="fig/supplementary/all_acf.pdf", width = 8, height = 11 , paper="a4")
   plot(gg.all_acf)
 try(dev.off(), silent=TRUE)
-
-# Mean Autocorrelation across all primers
-tree <- ape::read.tree("reference/trees/ultrametric_insecta_tree_order_constrained.nwk")
-
-primer_mismatch <- vroom::vroom("primer_evaluation/mismatch_all.csv.gz",delim = ",") %>% 
-  mutate(Acc = Acc %>% str_remove("\\|.*$") %>%
-           acc2hex()) %>%
-  mutate(tips = paste0(Acc, "|", Species)) %>%
-  select(primer, tips, values = sum) %>%
-  group_by(tips) %>%
-  summarise(values = mean(values, na.rm=TRUE))
-            
-weights <- tree$tip.label %>% 
-    enframe() %>% 
-    select(-name, tips = value) %>%
-      left_join(primer_mismatch ) %>%
-    filter(!is.na(values))
-
-# Subset to only those with known states
-subset_tree <- get_subtree_with_tips(tree, weights$tips)$subtree
-print(length(subset_tree$tip.label))
-
-# Get tip states
-tip_states <- weights %>%
-  dplyr::pull(values)
-names(tip_states) <- weights %>%
-  dplyr::pull(tips)
-
-# Autocorrelation funciton
-acf_mean <- castor::get_trait_acf(subset_tree, tip_states, Npairs=1e8, Nbins=100)
-  
-# Create output data frame
-data.frame(
-    distances = acf_mean$distances,
-    acf_acf = acf_mean$autocorrelations) %>%
-ggplot(aes(x = distances, y=acf_acf)) +
-  geom_line() +
-  base_theme
-
-
 ```
 
 
