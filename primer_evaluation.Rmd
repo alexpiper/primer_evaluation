@@ -28,8 +28,8 @@ editor_options:
                     "TmCalculator",
                     "castor",
                     "furrr",
-                    "tictoc", 
-                    "UpSetR")
+                    "UpSetR",
+                    "DescTools")
 
 .bioc_packages <- c("DECIPHER",
                     "ggtree",
@@ -1082,6 +1082,28 @@ Arrange this on the tree and see how much phylogenetic signal there is
 The phylogenetic autocorrelation function (ACF) of known 16S GCNs across the SILVA-derived tree (Fig. 1a) was calculated using the castor function get_trait_acf based on 108 tip pairs (options “Npairs=1e8, Nbins=100”), chosen randomly among tips with known GCN. The function get_trait_acf randomly picks OTU pairs on the tree, bins them into one of many intervals of phylogenetic distance, and calculates the Pearson autocorrelation between GCNs of the OTU pairs within each bin. Note that this analysis does not assume that GCNs scale linearly with phylogenetic distance. Instead, the ACF merely measures the statistical correlation between GCNs on distinct tips, conditional upon the tips being within a certain phylogenetic distance from each other.
 
 ```{r ID success on tree}
+# get Lineage for tree
+seqs <- insect::readFASTA("reference/merged_final.fa.gz")
+
+seqs <- acc2hex(seqs)
+
+lineage <- names(seqs) %>%
+  str_split_fixed(pattern="\\|", n = 2) %>%
+  as_tibble() %>%
+  separate(V2, into=c("taxid","Kingdom", "Phylum", 
+    "Class", "Order", "Family", "Genus", "Species"), sep=";") %>%
+  dplyr::rename(acc = V1)%>%
+  mutate(Species = Species %>% str_replace_all(" ", "_")) %>%
+  dplyr::select(-Species)
+
+upper_lineage <- c(0.97, 0.98,0.99,1) %>%
+      purrr::map(~{
+        lineage %>% select(-taxid, -acc) %>%
+          distinct() %>%
+          mutate(threshold = .x)
+      }) %>%
+      bind_rows()
+
 # Get mixed clusters for the LCO-HCO gene region
 folmer_id <- vroom::vroom("primer_evaluation/amplicons/usearch_output/LCO1490_HCO2198.txt.gz",
                           delim="\t", col_names = c("acc1", "acc2", "dist")) %>%
@@ -1100,35 +1122,24 @@ folmer_id <- vroom::vroom("primer_evaluation/amplicons/usearch_output/LCO1490_HC
     dplyr::group_by(threshold, spp1) %>% 
     dplyr::summarise(mixed=n_distinct(spp2)) %>%
     ungroup() %>%
-  mutate(spp1 = spp1 %>% str_replace_all(" ", "_")) %>%
-  mutate(Genus = spp1 %>% str_remove("_.*$")) %>%
-  group_by(Genus, threshold) %>%
-  dplyr::summarise(mixed=sum(mixed)) 
-  
+    mutate(Genus = spp1 %>% str_remove(" .*$")) 
+
+folmer_id <- folmer_id %>%
+    right_join(upper_lineage) %>%
+    mutate(mixed = replace_na(mixed, 0)) %>%
+    group_by(Family, threshold) %>%
+    dplyr::summarise(mixed=mean(mixed)) # Could do sum instead
 
 # Arrange on tree
 tree <- ape::read.tree("reference/trees/ultrametric_insecta_tree_order_constrained.nwk")
-
-# get Lineage for tree
-seqs <- insect::readFASTA("reference/merged_final.fa.gz")
-
-seqs <- acc2hex(seqs)
-
-lineage <- names(seqs) %>%
-  str_split_fixed(pattern="\\|", n = 2) %>%
-  as_tibble() %>%
-  separate(V2, into=c("taxid","Kingdom", "Phylum", 
-    "Class", "Order", "Family", "Genus", "Species"), sep=";") %>%
-  dplyr::rename(acc = V1)%>%
-  mutate(Species = Species %>% str_replace_all(" ", "_")) %>%
-  dplyr::select(-Species)
 
 # Prune tree to genus
 tips_to_keep <- tree$tip.label %>% 
   enframe() %>% 
   tidyr::separate(value, into=c("acc", "Species"), sep="\\|") %>%
   left_join(lineage, by="acc") %>%
-  group_by(Genus) %>%
+  filter(!is.na(Family)) %>%
+  group_by(Family) %>%
   dplyr::slice(1) %>%
   ungroup() %>%
   mutate(tips = paste0(acc,"|", Species))
@@ -1141,14 +1152,17 @@ genus_tree  <- castor::get_subtree_with_tips(tree,
                                           force_keep_root=TRUE)$subtree
 
 
-#Prune names to genus
-genus_tree$tip.label <- genus_tree$tip.label %>% 
-  str_remove("^.*\\|") %>%
-  str_extract("^.+?(?=_)")
+#Prune names to Family
+genus_tree$tip.label <- genus_tree$tip.label %>%
+  str_remove("\\|.*$")%>%
+  enframe() %>%
+  mutate(acc = value)%>%
+  left_join(lineage) %>%
+  pull(Family)
 
 # Filter id sucess to just those in tree
 folmer_id_filtered <- folmer_id %>%
-  dplyr::filter(Genus %in%  genus_tree$tip.label)
+  dplyr::filter(Family %in%  genus_tree$tip.label)
 
 Ntips 	<- length(genus_tree$tip.label)
 Nnodes 	<- genus_tree$Nnode
@@ -1180,14 +1194,14 @@ names(acfvec) <- thresholds
 
 i=1
 for(i in 1:length(thresholds)){
-  
-  p1 <- ggtree(genus_tree , ladderize=TRUE, aes(colour=values), layout = "circular") 
+
+    p1 <- ggtree(genus_tree , ladderize=TRUE, aes(colour=values), layout = "circular") 
   
   weights_p1 <- p1$data %>%
     left_join(folmer_id_filtered %>% 
                 filter(threshold == thresholds[i]) %>%
                 select(-threshold) %>%
-                dplyr::rename(label = Genus, values = mixed))%>%
+                dplyr::rename(label = Family, values = mixed))%>%
     mutate(values = values %>% replace_na(0))
                 
       
@@ -1203,71 +1217,90 @@ for(i in 1:length(thresholds)){
 
   p2 <- p1 %<+% weights_p1 +
     scale_color_gradient(low="darkslateblue", high="firebrick",na.value = NA, limits = c(0,5), oob = scales::squish) +
-    #geom_tippoint(aes(colour=highlight), size=.5) +
     theme(legend.position = "none") + 
     scale_y_continuous(expand=c(0,0))+ 
     scale_x_discrete(expand=c(0,0)) 
   
-
-  ## make a clade label list
-  tax_groups <- tips_to_keep %>%
-    dplyr::rename(label = Genus) %>%
-    select(label, Order) %>%
-    filter(label %in% genus_tree$tip.label) %>%
-    group_by(Order) 
+  # Add heatmap
+  plot_dat <- p1$data %>%
+    left_join(folmer_id_filtered %>%
+    filter(threshold == thresholds[i]) %>%
+    select(-threshold) %>%
+    dplyr::rename(label = Family, values = mixed)) %>%
+    mutate(values = values %>% replace_na(0)) %>% #Use 1 to not mess with log10 transform
+    filter(!is.na(label)) %>%
+    column_to_rownames("label") %>%
+    select(values) %>%
+    as.data.frame()
   
-  group_name <- group_keys(tax_groups)  %>%
-    mutate(group_name = Order %>% str_remove_all("\\[|\\]"))
   
-  cls <- tax_groups %>% 
-    group_split() %>% 
-    purrr::map(pull, label) %>%
-    set_names(group_name$group_name) %>%
-    purrr::map(function(x){
-      query <- x
-      labs <-  p2$data %>%
-        dplyr::filter(label %in% query)
-      quants <- labs  %>% 
-        dplyr::filter(between(y, left=quantile(labs$y,  probs =0.1), right=quantile(labs$y,  probs =0.90)))
-      
-      if(length(quants$label) > 1){
-        mrca_node <- get_mrca_of_set(genus_tree, quants$label)
-      
-        if(mrca_node > Ntips){
-          subset_node <- mrca_node-Ntips
-        } else{
-          subset_node <- mrca_node
-        }
-        subset_tree <- get_subtree_at_node(genus_tree, subset_node)$subtree
-        print(length(subset_tree$tip.label))
-        
-        # Only label the bigger ones
-        if(length(subset_tree$tip.label) < 1000){
-          mrca_node <- NULL
-        }
-      } else{
-        mrca_node <- NULL
-      }
-      
-      return(mrca_node)
-    })
+  p3 <- gheatmap(p2,plot_dat, offset=0, width=.1, color=NA, legend_title = NA, colnames  = FALSE,
+    colnames_angle=95, colnames_offset_y = 0) +
+    #scale_fill_viridis_c(option="C", name="Pest Spp.", trans="log10")  #, trans="log10"
+    scale_fill_gradient(low="darkslateblue", high="firebrick",na.value = NA, limits = c(0,5), oob = scales::squish)+
+    theme(legend.position = "none")
   
-  #drop small nodes
-  cls <- cls[!sapply(cls, is.null)]
   
-  # colours 
-  colourCount = length(cls)
-  getPalette = colorRampPalette(brewer.pal(12, "Paired"))
-  colour.pal <- getPalette(colourCount)
-  
-  p3 <- p2
-  for(l in 1:length(cls)){
-    p3 <- p3 + geom_cladelabel(
-      node=cls[[l]], label=names(cls[l]), 
-      align=T, angle=270, hjust='center', offset.text=.25, 
-      barsize=1.5, color = colour.pal[[l]])
-  }
-  plotvec[[i]] <- p3
+#
+  ### make a clade label list
+  #tax_groups <- tips_to_keep %>%
+  #  dplyr::rename(label = Family) %>%
+  #  select(label, Order) %>%
+  #  filter(label %in% genus_tree$tip.label) %>%
+  #  group_by(Order) 
+  #
+  #group_name <- group_keys(tax_groups)  %>%
+  #  mutate(group_name = Order %>% str_remove_all("\\[|\\]"))
+  #
+  #cls <- tax_groups %>% 
+  #  group_split() %>% 
+  #  purrr::map(pull, label) %>%
+  #  set_names(group_name$group_name) %>%
+  #  purrr::map(function(x){
+  #    query <- x
+  #    labs <-  p2$data %>%
+  #      dplyr::filter(label %in% query)
+  #    quants <- labs  %>% 
+  #      dplyr::filter(between(y, left=quantile(labs$y,  probs =0.1), right=quantile(labs$y,  probs =0.90)))
+  #    
+  #    if(length(quants$label) > 1){
+  #      mrca_node <- get_mrca_of_set(genus_tree, quants$label)
+  #    
+  #      if(mrca_node > Ntips){
+  #        subset_node <- mrca_node-Ntips
+  #      } else{
+  #        subset_node <- mrca_node
+  #      }
+  #      subset_tree <- get_subtree_at_node(genus_tree, subset_node)$subtree
+  #      print(length(subset_tree$tip.label))
+  #      
+  #      # Only label the bigger ones
+  #      if(length(subset_tree$tip.label) < 100){
+  #        mrca_node <- NULL
+  #      }
+  #    } else{
+  #      mrca_node <- NULL
+  #    }
+  #    
+  #    return(mrca_node)
+  #  })
+  #
+  ##drop small nodes
+  #cls <- cls[!sapply(cls, is.null)]
+  #
+  ## colours 
+  #colourCount = length(cls)
+  #getPalette = colorRampPalette(brewer.pal(12, "Paired"))
+  #colour.pal <- getPalette(colourCount)
+  #
+  #p3 <- p2
+  #for(l in 1:length(cls)){
+  #  p3 <- p3 + geom_cladelabel(
+  #    node=cls[[l]], label=names(cls[l]), 
+  #    align=T, angle=270, hjust='center', offset.text=.25, 
+  #    barsize=1.5, color = colour.pal[[l]])
+  #}
+  plotvec[[i]] <- p2
 
 }
 
@@ -1355,7 +1388,7 @@ acf <- acfvec %>%
 gg.acf <- acf %>% 
   filter(type == "acf_acf", distances < 16) %>%
   ggplot(aes(x = distances, y=value)) +
-  geom_line() +
+  geom_line(colour="darkslateblue") +
   base_theme+
   facet_grid(threshold~.) +
   theme(legend.position = "none") + 
@@ -1393,48 +1426,31 @@ bad_clades_labels <- bad_clades %>%
 library(ggrepel)
 
 gg.bad_clades <- bad_clades %>% 
-  ggplot(aes(x= mean_depth_pos_clades, y=traits_per_pos_clades)) + 
+  ggplot(aes(x= mean_depth_pos_clades, y=traits_per_pos_clades, colour=mean_depth_pos_clades)) + 
   geom_point(alpha=0.1) + 
   geom_point(data = bad_clades_labels, aes(x=mean_depth_pos_clades, y=traits_per_pos_clades), colour="red")+
   geom_text_repel(data = bad_clades_labels, aes(x=mean_depth_pos_clades, y=traits_per_pos_clades, label= subtree_taxonomy), colour="red")+
   scale_y_log10()+
-  #scale_x_log10()+
+  scale_colour_gradient(low ="darkslateblue", high ="firebrick", na.value = "grey") +
     facet_grid(threshold~.) +
   base_theme+
   theme(legend.position = "none") + 
     labs(x="Mean phylogenetic depth",
-         y="Number of Failed ID's")
+         y="Number of descendants")
 
 # Or could pull out the positive clades, then get the descnedants for htem
 
 
 # Plot figure 4 
 Fig4a <- plotvec[[1]] / plotvec[[2]] / plotvec[[3]] / plotvec[[4]]
+Fig4b <- gg.id + gg.acf + gg.bad_clades + plot_layout(widths = c(3,1,1))
 
-Fig4 <- Fig4a - gg.id - (gg.acf + gg.bad_clades)
+Fig4 <- Fig4a - Fig4b + plot_layout(widths = c(1,3))
 
-Fig4
-
-pdf(file="fig/Fig4_id_success.pdf", width = 8, height = 11 , paper="a4")
+pdf(file="fig/Fig4_id_success.pdf", width = 11, height = 8 , paper="a4r")
   plot(Fig4)
 try(dev.off(), silent=TRUE)
 
-  
-test1 <-  (gg.acf + gg.bad_clades)
-
-gg.id - test1 + plot_layout(widths=c(2,1))
-  
-#  Look at clade with the highest positives
-hist(consentrait$positives_per_clade)
-
-pos <- consentrait$positives_per_clade
-
-which.max(pos)
-
-subset_tree <- get_subtree_at_node(tree, which.max(pos) -Ntip(tree))$subtree
-subset_tree$tip.label
-
-       
 ```
 
 
