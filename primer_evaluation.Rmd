@@ -270,6 +270,308 @@ lineage %>%
   arrange(freq)
 ```
 
+
+# Figure 2 - Sequence summary
+
+```{r sequence tracker}
+# Create read origins 
+origin <- bind_rows(
+  #Genbank Insecta
+  fasta.index(list.files("reference/insecta/genbank", pattern = ".fa", full.names = TRUE)) %>%
+  mutate(origin = "GenBank") %>% #genbank_insecta
+  select(origin, desc),
+  #BOLD Insecta
+  fasta.index(list.files("reference/insecta/bold", pattern = ".fa", full.names = TRUE)) %>%
+  mutate(origin = "BOLD") %>% #bold_insecta
+  select(origin, desc),
+  #Genbank Arachnida
+  fasta.index(list.files("reference/arachnida/genbank", pattern = ".fa", full.names = TRUE)) %>%
+  mutate(origin = "GenBank") %>% #genbank_arachnida
+  select(origin, desc),
+  #BOLD Arachnida
+  fasta.index(list.files("reference/arachnida/bold", pattern = ".fa", full.names = TRUE)) %>%
+  mutate(origin = "BOLD") %>% #bold_arachnida
+  select(origin, desc),
+) %>%
+    mutate(seqid = desc %>%
+    str_remove(pattern="(\\|)(.*?)(?=$)") %>%
+    str_replace_all(" ", "_") ) %>%
+  distinct() %>%
+  mutate(Duplicated = case_when(
+    duplicated(seqid) & str_detect(origin, "bold") ~ TRUE,
+    TRUE ~ FALSE
+    )) %>%
+  filter(!Duplicated) %>%   
+  filter(!duplicated(seqid)) %>%
+  select(-Duplicated, -desc)
+
+## summarise number of sequences at each stage and their origins
+tracker <- bind_rows(
+                  taxreturn::summarise_fasta("reference/01_mergedseqs.fa.gz",
+                                             label="01_merged",
+                                             origin=origin),
+                  taxreturn::summarise_fasta("reference/02_uniqSeqs.fa.gz",
+                                             label="02_unique",
+                                             origin=origin),
+                  taxreturn::summarise_fasta("reference/03_resolved.fa.gz",
+                                             label="03_resolved",
+                                             origin=origin),
+                  taxreturn::summarise_fasta("reference/04_name_filtered.fa.gz",
+                                             label="04_name_filt",
+                                             origin=origin),
+                  taxreturn::summarise_fasta("reference/05_filtered.fa.gz",
+                                             label="05_phmm_filt",
+                                             origin=origin),
+                  taxreturn::summarise_fasta("reference/06_codon_filtered.fa.gz",
+                                             label="06_codon_filt",
+                                             origin=origin),
+                  taxreturn::summarise_fasta("reference/07_purged.fa.gz",
+                                             label="07_mixed_clusters",
+                                             origin=origin),
+                  taxreturn::summarise_fasta("reference/08_contam_removed.fa.gz",
+                                             label="08_contam_removed",
+                                             origin=origin), 
+                  taxreturn::summarise_fasta("reference/09_lengthfilt.fa.gz",
+                                             label="09_lengthfilt",
+                                             origin=origin), 
+                  taxreturn::summarise_fasta("reference/10_pruned.fa.gz", 
+                                             label="10_pruned",
+                                             origin=origin)
+
+) %>%
+  pivot_longer(cols=starts_with("n"),
+               names_to = "Type",
+               values_to = "value"
+               )
+write_csv(tracker, "reference/sequence_tracker.csv")
+
+tracker <- read_csv("reference/sequence_tracker.csv")
+tracker %>% 
+  group_by(Type, label) %>%
+  summarise(value = sum(value))
+
+gg.cleaning <- tracker %>%
+  filter(!origin %in% c("genbank_arachnida/genbank_insecta", "bold_arachnida/bold_insecta/genbank_arachnida/genbank_insecta")) %>%
+  mutate(Type = Type %>% 
+           str_replace("nseqs", "# Sequences") %>%
+            str_replace("nspecies", "# Species")) %>%
+  ggplot(aes(x=label, y=value, group=origin, fill=origin)) +
+  geom_col(alpha=0.8) +
+  facet_wrap(~Type, nrow=2, ncol=1, scales = "free_y") +
+  scale_fill_brewer(palette="Paired") +
+  xlab("Filter stage") +
+  ylab("# Sequences") +
+  scale_y_continuous(labels = scales::comma) +
+  base_theme + 
+  theme(legend.position="top",
+        panel.grid = element_blank()) +
+  labs(x = "Filter stage",
+       y = NULL,
+       fill = "Sequence Origin")
+
+gg.cleaning
+# find differences between lenghtfilt and pruned - why does total species reduce? is it hte way its calculated or just those that couldnt be mapped to taxonomy?
+
+# Pre and post pruning
+
+pruning_summary <- Biostrings::fasta.index("reference/database_builder/09_lengthfilt.fa.gz") %>%
+  bind_rows(Biostrings::fasta.index("reference/database_builder/10_pruned.fa.gz"))%>%
+  mutate(species = desc %>% str_remove("^.*;")) %>%
+  mutate(stage = case_when(
+    str_detect(filepath, "lengthfilt") ~ "Unpruned",
+    str_detect(filepath, "pruned") ~ "Pruned"
+  )) %>%
+  dplyr::select(species, stage) %>%
+  group_by(species, stage) %>%
+  summarise(n = n())
+
+gg.pruning <- ggplot(pruning_summary, aes(x = stage, y=n, fill=stage)) +
+  geom_boxplot(colour="black", alpha = 0.5) + 
+  base_theme+
+  scale_y_log10() +
+  scale_fill_brewer(palette = "Paired") + 
+  coord_flip()+
+  labs(y = "# Sequences per species", x= NULL) +
+  theme(panel.grid = element_blank()) 
+
+
+# Summary of unique taxa
+seqs <- insect::readFASTA("reference/merged_final.fa.gz")
+
+# Summarise unique ranks
+names(seqs) %>%
+  str_split_fixed(";", n=Inf) %>%
+  as.data.frame() %>%
+  magrittr::set_colnames(c("total", "kingdom", "phylum", "class", "order", "family", "genus", "species")) %>%
+  dplyr::summarise_at(c("total", "kingdom", "phylum", "class", "order", "family", "genus", "species"), n_distinct) 
+
+
+# Plot phylogenetic tree
+# get Lineage for tree
+seqs <- insect::readFASTA("reference/merged_final.fa.gz")
+
+seqs <- acc2hex(seqs)
+
+lineage <- names(seqs) %>%
+  str_split_fixed(pattern="\\|", n = 2) %>%
+  as_tibble() %>%
+  separate(V2, into=c("taxid","Kingdom", "Phylum", 
+    "Class", "Order", "Family", "Genus", "Species"), sep=";") %>%
+  dplyr::rename(acc = V1)%>%
+  mutate(Species = Species %>% str_replace_all(" ", "_")) %>%
+  dplyr::select(-Species)
+
+
+# Arrange on tree
+tree <- ape::read.tree("reference/trees/ultrametric_insecta_tree_order_constrained.nwk")
+
+# Prune tree to genus
+tips_to_keep <- tree$tip.label %>% 
+  enframe() %>% 
+  tidyr::separate(value, into=c("acc", "Species"), sep="\\|") %>%
+  left_join(lineage, by="acc") %>%
+  filter(!is.na(Genus)) %>%
+  group_by(Genus) %>%
+  dplyr::slice(1) %>%
+  ungroup() %>%
+  mutate(tips = paste0(acc,"|", Species))
+
+
+#Prune tree to genus
+genus_tree  <- castor::get_subtree_with_tips(tree,
+                                          only_tips = tips_to_keep$tips,
+                                          collapse_monofurcations=TRUE,
+                                          force_keep_root=TRUE)$subtree
+
+genus_tree$tip.label <- genus_tree$tip.label %>%
+  str_remove("\\|.*$")%>%
+  enframe() %>%
+  mutate(acc = value)%>%
+  left_join(lineage) %>%
+  pull(Genus)
+
+Ntips 	<- length(genus_tree$tip.label)
+Nnodes 	<- genus_tree$Nnode
+cat(sprintf("Tree has %d nodes, %d tips and %d edges\n",Nnodes,Ntips,nrow(genus_tree$edge)));
+
+# create internal node labels
+genus_tree$node.label <- NA
+if(is.na(genus_tree$node.label)){
+	cat(sprintf("Adding node labels to full tree..\n"))
+	genus_tree$node.label = paste("node.", 1:Nnodes, sep = "") # don't use underscores, because some tree readers (e.g. rncl) interpret them as spaces
+}
+
+# replace zero-length edges
+if(any(genus_tree$edge.length==0)){
+  epsilon = 0.1*min(genus_tree$edge.length[genus_tree$edge.length>0])
+	cat(sprintf("Note: Some edges have length zero, which may break some of the HSP routines. Replacing zero-lengths with a tiny positive length (%g)..\n",epsilon))
+	genus_tree$edge.length[genus_tree$edge.length==0] = epsilon
+}
+
+pestlist <- read_csv("primer_evaluation/pestlist.csv") 
+
+
+# Plot tree
+p1 <- ggtree(genus_tree , ladderize=TRUE, aes(colour=values), layout = "circular") 
+  
+weights_p1 <- p1$data %>%
+  left_join(pestlist %>% 
+              group_by(Genus) %>%
+              summarise(values = n_distinct(Species)) %>%
+              dplyr::rename(label = Genus) )%>%
+  mutate(values = values %>% replace_na(0))
+              
+tip_states <- weights_p1 %>%
+  dplyr::filter(isTip) %>%
+  pull(values)
+names(tip_states) <- weights_p1 %>%
+  dplyr::filter(isTip) %>%
+  pull(label)
+
+weights_p1$values[!weights_p1$isTip] <- castor::asr_independent_contrasts(tree=genus_tree,
+                                                          tip_states=tip_states, check_input = FALSE)$ancestral_states
+
+p2 <- p1 %<+% weights_p1 +
+ scale_color_gradient(low="darkslateblue", high="firebrick",na.value = NA, limits = c(0,5), oob = scales::squish) +
+ theme(legend.position = "none") + 
+ scale_y_continuous(expand=c(0,0))+ 
+ scale_x_discrete(expand=c(0,0)) 
+
+### make a clade label list
+tax_groups <- tips_to_keep %>%
+ dplyr::rename(label = Genus) %>%
+ select(label, Order) %>%
+ filter(label %in% genus_tree$tip.label) %>%
+ group_by(Order) 
+
+group_name <- group_keys(tax_groups)  %>%
+ mutate(group_name = Order %>% str_remove_all("\\[|\\]"))
+
+cls <- tax_groups %>% 
+ group_split() %>% 
+ purrr::map(pull, label) %>%
+ set_names(group_name$group_name) %>%
+ purrr::map(function(x){
+   query <- x
+   labs <-  p2$data %>%
+     dplyr::filter(label %in% query)
+   quants <- labs  %>% 
+     dplyr::filter(between(y, left=quantile(labs$y,  probs =0.1), right=quantile(labs$y,  probs =0.90)))
+   
+   if(length(quants$label) > 1){
+     mrca_node <- get_mrca_of_set(genus_tree, quants$label)
+   
+     if(mrca_node > Ntips){
+       subset_node <- mrca_node-Ntips
+     } else{
+       subset_node <- mrca_node
+     }
+     subset_tree <- get_subtree_at_node(genus_tree, subset_node)$subtree
+     print(length(subset_tree$tip.label))
+     
+     # Only label the bigger ones
+     if(length(subset_tree$tip.label) < 50){
+       mrca_node <- NULL
+     }
+   } else{
+     mrca_node <- NULL
+   }
+   
+   return(mrca_node)
+ })
+
+#drop small nodes
+cls <- cls[!sapply(cls, is.null)]
+
+# colours 
+colourCount = length(cls)
+getPalette = colorRampPalette(brewer.pal(12, "Paired"))
+colour.pal <- getPalette(colourCount)
+
+p3 <- p2
+for(l in 1:length(cls)){
+ p3 <- p3 + geom_cladelabel(
+   node=cls[[l]], label=names(cls[l]), 
+   align=T, hjust='center', offset.text=.25, 
+   barsize=1.5, color = colour.pal[[l]])
+}
+
+gg.phylo <- p3
+
+Fig2a <- gg.cleaning / gg.pruning + plot_layout(heights= c(3,1))
+Fig2 <- Fig2a - gg.phylo + plot_layout(widths = c(2,3), ncol = 2)+ 
+  plot_annotation(tag_levels = 'A') 
+
+Fig2
+
+#Save figure 2
+pdf(file="fig/Fig2_database_summary.pdf", width = 11, height = 8 , paper="a4r")
+  plot(Fig2)
+try(dev.off(), silent=TRUE)
+  
+```
+
+
 # Primer statistics
 
 ```{r primer binding and constraints}
@@ -637,7 +939,7 @@ Fig3 <- gg.entropy / gg.primers / gg.sequences / gg.swline + plot_layout(heights
 Fig3
 
 
-#
+ma <- function(x, n=3){stats::filter(x, rep(1/n, n), sides=2)}
 
 gg.swline <-  ent_sw %>%
  # mutate(sw = replace_na(sw, 0)) %>%
@@ -657,6 +959,10 @@ gg.swline <-  ent_sw %>%
 
 gg.swline
  
+
+Fig3 <- gg.entropy / gg.primers / gg.sequences / gg.swline + plot_layout(heights= c(3, 3, 0.5, 2)) 
+
+Fig3
 ```
 
 # Sliding window
@@ -681,11 +987,6 @@ alignment_sw <- function(x, width, interval = 1, maxgaps=0){
   names(out) <- paste(win, win+width, sep="-")
   return(out)
 }
-
-# Make 100bp windows
-dir.create("primer_evaluation/amplicons/win100/")
-alignment_sw(seqs, width=100, interval=3, maxgaps=9) %>%
-  purrr::map2(., names(.), ~Biostrings::writeXStringSet(.x, file=paste0("primer_evaluation/amplicons/win100/", .y,".fa.gz"), compress=TRUE))
 
 # Make 200bp windows
 dir.create("primer_evaluation/amplicons/win200/")
@@ -725,8 +1026,7 @@ pestlist <- read_csv("primer_evaluation/pestlist.csv")
 # Get mixed clusters
 library(furrr)
 plan(multiprocess, workers=8)
-sw_clusters <- c(fs::dir_ls(path="primer_evaluation/amplicons/win100/usearch_output/", glob = "*.txt.gz"),
-                    fs::dir_ls(path="primer_evaluation/amplicons/win200/usearch_output/", glob = "*.txt.gz"),
+sw_clusters <- c(fs::dir_ls(path="primer_evaluation/amplicons/win200/usearch_output/", glob = "*.txt.gz"),
                     fs::dir_ls(path="primer_evaluation/amplicons/win300/usearch_output/", glob = "*.txt.gz"),
                     fs::dir_ls(path="primer_evaluation/amplicons/win400/usearch_output/", glob = "*.txt.gz")) %>%
   furrr::future_map(function(x){
@@ -752,10 +1052,9 @@ sw_clusters <- c(fs::dir_ls(path="primer_evaluation/amplicons/win100/usearch_out
   mutate(win_length = win_end - win_start)
   
 #Get amplified
-amplified <-c(fs::dir_ls(path="primer_evaluation/amplicons/win100/", glob = "*.fa.gz"),
-                    fs::dir_ls(path="primer_evaluation/amplicons/win200/", glob = "*.fa.gz"),
-                    fs::dir_ls(path="primer_evaluation/amplicons/win300/", glob = "*.fa.gz"),
-                    fs::dir_ls(path="primer_evaluation/amplicons/win400/", glob = "*.fa.gz")) %>%
+amplified <-c(fs::dir_ls(path="primer_evaluation/amplicons/win200/", glob = "*.fa.gz"),
+              fs::dir_ls(path="primer_evaluation/amplicons/win300/", glob = "*.fa.gz"),
+              fs::dir_ls(path="primer_evaluation/amplicons/win400/", glob = "*.fa.gz")) %>%
    purrr::map(function(x){
    #furrr::future_map(function(x){
      fasta.index(x) %>%
@@ -770,11 +1069,128 @@ amplified <-c(fs::dir_ls(path="primer_evaluation/amplicons/win100/", glob = "*.f
   dplyr::select(-filepath)
 
 sw_joint <- sw_clusters %>%
-  left_join(amplified) %>%
-  mutate(combos = source) %>% 
-  tidyr::separate(source, into=c("Fname", "Rname"), sep="_", extra="merge")
-
+  left_join(amplified) 
 vroom::vroom_write(sw_joint, "primer_evaluation/amplicons/sw_clusters_summary.csv", delim=",")
+
+# Read in
+sw_joint <- vroom::vroom("primer_evaluation/amplicons/sw_clusters_summary.csv", delim=",")%>%
+  mutate(pos = win_start) %>%
+  mutate(success =  (spp_amplified - mixed)/spp_amplified,
+           threshold = 1-dist)
+
+# New plot
+sw_means <- sw_joint %>%
+  filter(win_start > 25, win_end < (712-26)) %>%
+  group_by(source, threshold) %>%
+  group_split() %>%
+  purrr::map(function(x){
+    x %>% dplyr::slice(rep(1:n(), each = unique(x$win_length))) %>%
+      mutate(pos = seq(unique(x$win_start) , (unique(x$win_end)-1), 1))
+  }) %>%
+  bind_rows() %>%
+  ungroup() %>%
+  group_by(threshold, pos, win_length) %>%
+  summarise(success = mean(success))
+
+gg.swid <- sw_means %>%
+    filter(threshold == 0.97) %>%
+    ggplot(aes(x = pos, y=1)) +
+      geom_tile(aes(fill=success))+
+      scale_fill_viridis_c(option="plasma") + 
+    facet_wrap(win_length ~., ncol=1, strip.position ="right") +
+    scale_x_continuous(limits = c(0, 712), breaks=seq(0,700,50), expand=c(0,0))  +
+    #theme_void() +
+    theme(legend.position = "bottom",
+          axis.text.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          axis.title.y = element_blank())
+
+
+gg.swline <- sw_means %>%
+  filter(threshold == 0.97) %>%
+  ggplot(aes(x = pos, y=success)) +
+  geom_line()+
+  facet_wrap(win_length~., ncol=1, strip.position ="right") +
+  scale_x_continuous(limits = c(0, 712), breaks=seq(0,700,50), expand=c(0,0))  +
+  theme_void() +
+  theme(legend.position = "bottom",
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.y = element_blank())
+
+
+# Old plot
+
+ma <- function(x, n=3){stats::filter(x, rep(1/n, n), sides=2)}
+
+ref_pos <-  c(0.97, 0.98,0.99,1) %>%
+      purrr::map(~{
+        data.frame(pos = seq(1, 712, 1)) %>%
+          mutate(threshold = .x)
+      }) %>%
+      bind_rows()
+
+gg.swid <-  sw_joint %>%
+  dplyr::select(win_length, pos, success, threshold) %>%
+  group_by(win_length) %>%
+  group_split() %>%
+  purrr::map(~{
+    .x %>%
+      right_join(ref_pos %>% filter(pos < max(.x$pos))) %>%
+      mutate(win_length = unique(.x$win_length))
+  }) %>%
+  bind_rows() %>%
+  ungroup()%>%
+  group_by(win_length, threshold ) %>%
+  arrange(pos) %>%
+  tidyr::fill(success, .direction = "down")%>%
+  mutate(success_imp = ma(success, 3)) %>%
+  filter(!is.na(success_imp)) %>%
+  filter(threshold == 0.97) %>%
+    ggplot(aes(x = pos, y=1)) +
+      geom_tile(aes(fill=success_imp))+
+      scale_fill_viridis_c(option="plasma") + 
+    facet_wrap(win_length ~., ncol=1, strip.position ="right") +
+    scale_x_continuous(limits = c(0, 712), breaks=seq(0,700,50), expand=c(0,0))  +
+    theme_void() +
+    theme(legend.position = "bottom",
+          axis.text.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          axis.title.y = element_blank())
+  
+gg.swid
+
+gg.swline <-  sw_joint %>%
+  dplyr::select(win_length, pos, success, threshold) %>%
+  group_by(win_length) %>%
+  group_split() %>%
+  purrr::map(~{
+    .x %>%
+      right_join(ref_pos %>% filter(pos < max(.x$pos))) %>%
+      mutate(win_length = unique(.x$win_length))
+  }) %>%
+  bind_rows() %>%
+  ungroup()%>%
+  group_by(win_length, threshold ) %>%
+  arrange(pos) %>%
+  tidyr::fill(success, .direction = "down")%>%
+  mutate(success_imp = ma(success, 3)) %>%
+  filter(!is.na(success_imp)) %>%
+  filter(threshold == 0.97) %>%
+  ggplot(aes(x = pos, y=success_imp)) +
+  geom_line()+
+  facet_wrap(win_length~., ncol=1, strip.position ="right") +
+  scale_x_continuous(limits = c(0, 712), breaks=seq(0,700,50), expand=c(0,0))  +
+  theme_void() +
+  theme(legend.position = "bottom",
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.y = element_blank())
+
+gg.swline
+ 
+
+
 ```
 
 
@@ -1079,8 +1495,6 @@ for this we will analyse just the LCO HCO data. Will need to take in the raw amp
 
 Arrange this on the tree and see how much phylogenetic signal there is
 
-The phylogenetic autocorrelation function (ACF) of known 16S GCNs across the SILVA-derived tree (Fig. 1a) was calculated using the castor function get_trait_acf based on 108 tip pairs (options “Npairs=1e8, Nbins=100”), chosen randomly among tips with known GCN. The function get_trait_acf randomly picks OTU pairs on the tree, bins them into one of many intervals of phylogenetic distance, and calculates the Pearson autocorrelation between GCNs of the OTU pairs within each bin. Note that this analysis does not assume that GCNs scale linearly with phylogenetic distance. Instead, the ACF merely measures the statistical correlation between GCNs on distinct tips, conditional upon the tips being within a certain phylogenetic distance from each other.
-
 ```{r ID success on tree}
 # get Lineage for tree
 seqs <- insect::readFASTA("reference/merged_final.fa.gz")
@@ -1189,9 +1603,6 @@ thresholds <- unique(folmer_id_filtered$threshold)
 plotvec <- vector("list", length = length(thresholds))
 names(plotvec) <- thresholds
 
-acfvec <- vector("list", length = length(thresholds))
-names(acfvec) <- thresholds
-
 i=1
 for(i in 1:length(thresholds)){
 
@@ -1240,66 +1651,6 @@ for(i in 1:length(thresholds)){
     scale_fill_gradient(low="darkslateblue", high="firebrick",na.value = NA, limits = c(0,5), oob = scales::squish)+
     theme(legend.position = "none")
   
-  
-#
-  ### make a clade label list
-  #tax_groups <- tips_to_keep %>%
-  #  dplyr::rename(label = Family) %>%
-  #  select(label, Order) %>%
-  #  filter(label %in% genus_tree$tip.label) %>%
-  #  group_by(Order) 
-  #
-  #group_name <- group_keys(tax_groups)  %>%
-  #  mutate(group_name = Order %>% str_remove_all("\\[|\\]"))
-  #
-  #cls <- tax_groups %>% 
-  #  group_split() %>% 
-  #  purrr::map(pull, label) %>%
-  #  set_names(group_name$group_name) %>%
-  #  purrr::map(function(x){
-  #    query <- x
-  #    labs <-  p2$data %>%
-  #      dplyr::filter(label %in% query)
-  #    quants <- labs  %>% 
-  #      dplyr::filter(between(y, left=quantile(labs$y,  probs =0.1), right=quantile(labs$y,  probs =0.90)))
-  #    
-  #    if(length(quants$label) > 1){
-  #      mrca_node <- get_mrca_of_set(genus_tree, quants$label)
-  #    
-  #      if(mrca_node > Ntips){
-  #        subset_node <- mrca_node-Ntips
-  #      } else{
-  #        subset_node <- mrca_node
-  #      }
-  #      subset_tree <- get_subtree_at_node(genus_tree, subset_node)$subtree
-  #      print(length(subset_tree$tip.label))
-  #      
-  #      # Only label the bigger ones
-  #      if(length(subset_tree$tip.label) < 100){
-  #        mrca_node <- NULL
-  #      }
-  #    } else{
-  #      mrca_node <- NULL
-  #    }
-  #    
-  #    return(mrca_node)
-  #  })
-  #
-  ##drop small nodes
-  #cls <- cls[!sapply(cls, is.null)]
-  #
-  ## colours 
-  #colourCount = length(cls)
-  #getPalette = colorRampPalette(brewer.pal(12, "Paired"))
-  #colour.pal <- getPalette(colourCount)
-  #
-  #p3 <- p2
-  #for(l in 1:length(cls)){
-  #  p3 <- p3 + geom_cladelabel(
-  #    node=cls[[l]], label=names(cls[l]), 
-  #    align=T, angle=270, hjust='center', offset.text=.25, 
-  #    barsize=1.5, color = colour.pal[[l]])
-  #}
   plotvec[[i]] <- p2
 
 }
@@ -1824,9 +2175,6 @@ pdf(file="fig/Fig5_mismatch.pdf", width = 8, height = 11 , paper="a4")
 try(dev.off(), silent=TRUE)
  
 ```
-# Could put the autocorrelation function below the tree on the left
-  
-# Calculate phylogenetic signal
 
 # ACF Mismatch
 ```{r autocrrelation}
@@ -1843,6 +2191,8 @@ primer_mismatch <- vroom::vroom("primer_evaluation/mismatch_all.csv.gz",delim = 
 uprimers <- unique(primer_mismatch$primer)
 acfvec <- vector("list", length=length(uprimers))
 names(acfvec) <- uprimers
+traitvec <- vector("list", length = length(uprimers))
+names(traitvec) <- uprimers
 
 i=1
 for (i in 1:length(uprimers)){
@@ -1869,9 +2219,11 @@ for (i in 1:length(uprimers)){
   acf <- castor::get_trait_acf(subset_tree, tip_states, Npairs=1e8, Nbins=100)
   
   # Trait depth
-  #tip_states_binary <- tip_states
-  #tip_states_binary[tip_states_binary >0] <- 1
-  #consentrait <- get_trait_depth(subset_tree, tip_states_binary, count_singletons=FALSE, weighted=TRUE, Npermutations = 1000)
+  tip_states_binary <- tip_states
+  tip_states_binary[tip_states_binary >0] <- 1
+  consentrait <- get_trait_depth(subset_tree, tip_states_binary,
+                                 min_fraction = 0.9, #90% of clade must be insufficiently ID'd to be problmeatic
+                                 count_singletons=TRUE, weighted=FALSE, Npermutations = 1000)
   
   # Create output data frame
   acfvec[[i]] <- data.frame(
@@ -1879,13 +2231,14 @@ for (i in 1:length(uprimers)){
     acf_acf = acf$autocorrelations,
     acf_mean_abs = acf$mean_abs_differences,
     acf_mean_rel = acf$mean_rel_differences,
-    acf_npairs = acf$Npairs_per_distance
-    #,
-    #trait_mean = consentrait$mean_depth,
-    #trait_std = sqrt(consentrait$var_depth),
-    #trait_n = consentrait$Npositives,
-    #trait_p = consentrait$P
-    )
+    acf_npairs = acf$Npairs_per_distance)
+  
+  pos_clades <- consentrait$positive_clades
+  traitvec[[i]] <-  data.frame(
+    pos_clade_id = pos_clades,
+    traits_per_pos_clades = consentrait$positives_per_clade[pos_clades],
+    mean_depth_pos_clades = consentrait$mean_depth_per_clade[pos_clades]
+  )
 }
 
 acf <- acfvec %>%
@@ -1893,26 +2246,44 @@ acf <- acfvec %>%
 
 vroom::vroom_write(acf, "primer_evaluation/acf_mismatch.csv.gz",delim = ",")
 
+consentrait <- traitvec %>%
+  bind_rows(.id="primer")
+vroom::vroom_write(consentrait, "primer_evaluation/consentrait_mismatch.csv.gz",delim = ",")
+
+
 acf <- vroom::vroom("primer_evaluation/acf_mismatch.csv.gz") %>%
     filter(acf_npairs > 0) 
 
 gg.all_acf <- acf %>%
+  left_join(primers %>% mutate(primer = name)) %>%
   select(-acf_npairs) %>%
   group_by(primer) %>%
   pivot_longer(starts_with("acf_"),
                names_to="type",
                values_to="value") %>%
- filter(type == "acf_acf") %>%
-ggplot(aes(x = distances, y=value, group= primer)) +
-  geom_line(alpha=0.1, colour="black") +
-  base_theme #+
- # facet_wrap(~primer, scales = "free_y")
+  ungroup() %>%
+ filter(type == "acf_acf", strand=="F") %>%
+ggplot(aes(x = distances, y=value)) +
+  geom_line(alpha=1, colour="black") +
+  theme_void() +
+  facet_grid(primer~strand, drop = TRUE, scales="free_x") 
 
 gg.all_acf
 
-pdf(file="fig/supplementary/all_acf.pdf", width = 8, height = 11 , paper="a4")
+ pdf(file="fig/supplementary/all_acf.pdf", width = 8, height = 11 , paper="a4")
   plot(gg.all_acf)
 try(dev.off(), silent=TRUE)
+  
+  
+consentrait <- vroom::vroom("primer_evaluation/consentrait_mismatch.csv.gz") 
+
+consentrait %>%
+  left_join(primers %>% mutate(primer = name)) %>%
+ggplot(aes(x = primer, y=mean_depth_pos_clades, size=traits_per_pos_clades )) +
+  geom_point(alpha=0.2, colour="black") +
+  facet_grid(strand~., drop = TRUE) +
+  coord_flip()
+  
 ```
 
 
