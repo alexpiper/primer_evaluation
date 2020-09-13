@@ -634,8 +634,8 @@ for (i in 1:nrow(primers)){
     primer = query,
     strand = primers$strand[i],
     #Hamming distance (no indels in COI)
-    h0 = primerHits(query, target, max.mismatch=0, with.indels=FALSE),
-    h1 = primerHits(query, target, max.mismatch=1, with.indels=FALSE),
+    #h0 = primerHits(query, target, max.mismatch=0, with.indels=FALSE),
+    #h1 = primerHits(query, target, max.mismatch=1, with.indels=FALSE),
     h2 = primerHits(query, target, max.mismatch=2, with.indels=FALSE),
   )
   out[[i]] <- df
@@ -664,6 +664,7 @@ gg.primerpresF <- out %>%
   coord_flip() + 
   labs(x="Forward Primers", y=NULL)  +
   base_theme +
+  scale_y_continuous(labels = scales::label_number_si())+
   scale_fill_gradient(low = "firebrick", high = "darkslateblue", 
                       na.value = "grey", oob = scales::squish) 
 
@@ -676,6 +677,7 @@ gg.primerpresR <- out  %>%
   coord_flip() + 
   labs(x="Reverse Primers", y="# Sequences containing primers") +
   base_theme +
+  scale_y_continuous(labels = scales::label_number_si()) +
   scale_fill_gradient(low = "firebrick", high = "darkslateblue", 
                       na.value = "grey", oob = scales::squish) 
 
@@ -683,7 +685,7 @@ gg.primerpres <- gg.primerpresF / gg.primerpresR
 
 gg.primerpres
 
-pdf(file="fig/primerpres.pdf", width = 8, height = 11 , paper="a4")
+pdf(file="fig/supplementary/primerpres.pdf", width = 8, height = 11 , paper="a4")
   plot(gg.primerpres)
 try(dev.off(), silent=TRUE)
   
@@ -732,10 +734,7 @@ for (i in 1:length(queries)){
 
 ent_out <- bind_rows(entlist, .id="names")
 write_csv(ent_out, paste0("primer_evaluation/", queryrank,"_ent_out.csv"))
-```
 
-## Figure 3 
-```{r Figure 3 plotting}
 # Read in per order entropy
 ent <- read_csv("primer_evaluation/order_ent_out.csv") %>% 
   filter(bases > 20) # Filter to only those above 20 seqs
@@ -799,7 +798,10 @@ gg.entropy <- ent_smoothed %>%
   geom_boxplot(outlier.shape = NA, alpha=0.8) +
   geom_line(aes(x = pos, y=median),size=1, inherit.aes = FALSE) + #, colour="black"
   theme_classic() +    
-  theme(legend.position = "none") +
+  theme(legend.position = "none",
+        axis.ticks.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.title.x = element_blank()) +
   labs(
     x="Position within COI barcode locus",
     y="Shannons Entropy (H)",
@@ -819,8 +821,10 @@ gg.sequences <- ent_smoothed %>%
   labs(
     x="Position within COI barcode locus",
     y="# Sequences", colour=NULL) +
-  scale_x_continuous(limits = c(0, 712), breaks=seq(0,700,50), expand=c(0,0)) +
-  scale_color_manual(values=c("#e31a1c","#1f78b4")) 
+  scale_x_continuous(limits = c(0, 712), breaks=seq(0,700,50), expand=c(0,0), labels=scales::unit_format(unit="bp")) +
+  scale_y_continuous(labels = scales::label_number_si())+
+  scale_color_manual(values=c("#e31a1c","#1f78b4"))  
+
 
 
 ## Primers
@@ -882,94 +886,13 @@ gg.primers <- ggplot(data=ent_smoothed[ent_smoothed$pos==1,], aes(x = as.numeric
 
 gg.primers
 
-Fig3 <- gg.entropy / gg.primers / gg.sequences + plot_layout(heights= c(3, 3, 0.5))  +  plot_annotation(tag_levels = 'A') 
 
-Fig3
-
-pdf(file="fig/Fig3_COI_overview.pdf", width = 11, height = 8 , paper="a4r")
-  plot(Fig3)
-try(dev.off(), silent=TRUE)
-
-# Sliding window of entropy
-sw <- function(x, width, interval = 1){
-  win <- seq(1,  length(x) - width, by = interval) #Get all possible windows
-  out <- vector("numeric", length=length(x))
-  for(i in 1:length(win)){
-  out[[i]] <- sum(x[win[i]:(win[i] + width)])
-  }
-  out[out==0] <- NA
-  return(out)
-}
-
-ent_sw <- ent %>%
-  dplyr::rename(Order = names) %>%
-  ungroup()%>%
-  group_by(pos) %>%
-  summarise(ent = mean(ent)) %>%
-  mutate(sw100 = sw(ent, width=100, interval = 1)/100) %>%
-  mutate(sw200 = sw(ent, width=200, interval = 1)/200) %>%
-  mutate(sw300 = sw(ent, width=300, interval = 1)/300) %>%
-  mutate(sw400 = sw(ent, width=400, interval = 1)/400) %>%
-  #mutate(sw20 = sw(ent, width=20, interval = 1)/20) %>% #For primers
-  ungroup()%>%
-  pivot_longer(starts_with("sw"),
-               names_to = "windowsize",
-               values_to = "sw") 
-
-gg.swent <-  ent_sw %>%
- #mutate(Order = case_when(
- #   Order %in% c("Coleoptera", "Diptera", "Hemiptera", "Hymenoptera", "Lepidoptera") ~ Order,
- #  !Order %in% c("Coleoptera", "Diptera", "Hemiptera", "Hymenoptera", "Lepidoptera") ~ "Other"
- #  )) %>%
-  ggplot(aes(x = pos, y=1)) +
-    geom_tile(aes(fill=sw))+
-    scale_fill_viridis_c(option="plasma") + 
-  facet_wrap(windowsize~., ncol=1, strip.position ="right") +
-  scale_x_continuous(limits = c(0, 712), breaks=seq(0,700,50), expand=c(0,0))  +
-  theme_void() +
-  theme(legend.position = "bottom",
-        axis.text.y = element_blank(),
-        axis.ticks.y = element_blank(),
-        axis.title.y = element_blank())
-
-gg.swent
- 
-Fig3 <- gg.entropy / gg.primers / gg.sequences / gg.swline + plot_layout(heights= c(3, 3, 0.5, 2)) 
-
-Fig3
-
-
-ma <- function(x, n=3){stats::filter(x, rep(1/n, n), sides=2)}
-
-gg.swline <-  ent_sw %>%
- # mutate(sw = replace_na(sw, 0)) %>%
- #mutate(Order = case_when(
- #   Order %in% c("Coleoptera", "Diptera", "Hemiptera", "Hymenoptera", "Lepidoptera") ~ Order,
- #  !Order %in% c("Coleoptera", "Diptera", "Hemiptera", "Hymenoptera", "Lepidoptera") ~ "Other"
- #  )) %>%
-  ggplot(aes(x = pos, y=sw)) +
-  geom_line()+
-  facet_wrap(windowsize~., ncol=1, strip.position ="right") +
-  scale_x_continuous(limits = c(0, 712), breaks=seq(0,700,50), expand=c(0,0))  +
-  theme_void() +
-  theme(legend.position = "bottom",
-        axis.text.y = element_blank(),
-        axis.ticks.y = element_blank(),
-        axis.title.y = element_blank())
-
-gg.swline
- 
-
-Fig3 <- gg.entropy / gg.primers / gg.sequences / gg.swline + plot_layout(heights= c(3, 3, 0.5, 2)) 
-
-Fig3
 ```
 
 # Sliding window
 
 ## Sliding window PCR
 ```{r}
-
 # Load seqs
 seqs <- readDNAStringSet("reference/merged_final.fa.gz")
 seqs <- seqs[lengths(seqs)==712]
@@ -1096,100 +1019,23 @@ gg.swid <- sw_means %>%
     filter(threshold == 0.97) %>%
     ggplot(aes(x = pos, y=1)) +
       geom_tile(aes(fill=success))+
-      scale_fill_viridis_c(option="plasma") + 
-    facet_wrap(win_length ~., ncol=1, strip.position ="right") +
-    scale_x_continuous(limits = c(0, 712), breaks=seq(0,700,50), expand=c(0,0))  +
-    #theme_void() +
-    theme(legend.position = "bottom",
-          axis.text.y = element_blank(),
-          axis.ticks.y = element_blank(),
-          axis.title.y = element_blank())
-
-
-gg.swline <- sw_means %>%
-  filter(threshold == 0.97) %>%
-  ggplot(aes(x = pos, y=success)) +
-  geom_line()+
-  facet_wrap(win_length~., ncol=1, strip.position ="right") +
-  scale_x_continuous(limits = c(0, 712), breaks=seq(0,700,50), expand=c(0,0))  +
-  theme_void() +
-  theme(legend.position = "bottom",
-        axis.text.y = element_blank(),
-        axis.ticks.y = element_blank(),
-        axis.title.y = element_blank())
-
-
-# Old plot
-
-ma <- function(x, n=3){stats::filter(x, rep(1/n, n), sides=2)}
-
-ref_pos <-  c(0.97, 0.98,0.99,1) %>%
-      purrr::map(~{
-        data.frame(pos = seq(1, 712, 1)) %>%
-          mutate(threshold = .x)
-      }) %>%
-      bind_rows()
-
-gg.swid <-  sw_joint %>%
-  dplyr::select(win_length, pos, success, threshold) %>%
-  group_by(win_length) %>%
-  group_split() %>%
-  purrr::map(~{
-    .x %>%
-      right_join(ref_pos %>% filter(pos < max(.x$pos))) %>%
-      mutate(win_length = unique(.x$win_length))
-  }) %>%
-  bind_rows() %>%
-  ungroup()%>%
-  group_by(win_length, threshold ) %>%
-  arrange(pos) %>%
-  tidyr::fill(success, .direction = "down")%>%
-  mutate(success_imp = ma(success, 3)) %>%
-  filter(!is.na(success_imp)) %>%
-  filter(threshold == 0.97) %>%
-    ggplot(aes(x = pos, y=1)) +
-      geom_tile(aes(fill=success_imp))+
-      scale_fill_viridis_c(option="plasma") + 
-    facet_wrap(win_length ~., ncol=1, strip.position ="right") +
+      scale_fill_viridis_c(option="plasma", labels = scales::percent) + 
+    facet_wrap(win_length ~., ncol=1, strip.position ="left") +
     scale_x_continuous(limits = c(0, 712), breaks=seq(0,700,50), expand=c(0,0))  +
     theme_void() +
-    theme(legend.position = "bottom",
+    theme(legend.position = "right",
           axis.text.y = element_blank(),
-          axis.ticks.y = element_blank(),
-          axis.title.y = element_blank())
-  
-gg.swid
+          axis.ticks.y = element_blank()) +
+  labs(fill = "% Identified",
+       y = "Window size")
 
-gg.swline <-  sw_joint %>%
-  dplyr::select(win_length, pos, success, threshold) %>%
-  group_by(win_length) %>%
-  group_split() %>%
-  purrr::map(~{
-    .x %>%
-      right_join(ref_pos %>% filter(pos < max(.x$pos))) %>%
-      mutate(win_length = unique(.x$win_length))
-  }) %>%
-  bind_rows() %>%
-  ungroup()%>%
-  group_by(win_length, threshold ) %>%
-  arrange(pos) %>%
-  tidyr::fill(success, .direction = "down")%>%
-  mutate(success_imp = ma(success, 3)) %>%
-  filter(!is.na(success_imp)) %>%
-  filter(threshold == 0.97) %>%
-  ggplot(aes(x = pos, y=success_imp)) +
-  geom_line()+
-  facet_wrap(win_length~., ncol=1, strip.position ="right") +
-  scale_x_continuous(limits = c(0, 712), breaks=seq(0,700,50), expand=c(0,0))  +
-  theme_void() +
-  theme(legend.position = "bottom",
-        axis.text.y = element_blank(),
-        axis.ticks.y = element_blank(),
-        axis.title.y = element_blank())
 
-gg.swline
- 
+Fig3 <-  gg.primers / gg.entropy / gg.swid / gg.sequences  + plot_layout(heights= c(3, 3, 2, 0.5))   +  plot_annotation(tag_levels = 'A') 
 
+
+pdf(file="fig/Fig3_COI_overview.pdf", width = 11, height = 8 , paper="a4r")
+  plot(Fig3)
+try(dev.off(), silent=TRUE)
 
 ```
 
@@ -1467,7 +1313,7 @@ gg.id <- id_success %>%
             aes(x=amplicon, y=preds, linetype=signif_post_slope),  color = 'red', inherit.aes = FALSE) +
   geom_point(data=break_annot, aes(x=amplicon, y=preds),  color = 'red', inherit.aes = FALSE) +
   geom_text(data=break_annot, aes(x=amplicon, y=preds,
-                                  label=paste0(breakpoint, "bp p",ifelse(pval < 0.001,"<0.001", ">0.001"))),
+                                  label=paste0(breakpoint, "bp")), #,ifelse(pval < 0.001,"<0.001", ">0.001")
             nudge_y = 0.1,nudge_x = 120,  color = 'red', inherit.aes = FALSE) +
   geom_text(data=ref_annot, aes(x=amplicon, y=success,label=paste0("Max: ",round((success* 100),2), "%")),
             nudge_y = 0.05,  color = 'blue', inherit.aes = FALSE) +
@@ -1475,7 +1321,7 @@ gg.id <- id_success %>%
   scale_colour_gradient(low ="firebrick", high ="darkslateblue", na.value = "grey") +
   geom_hline(yintercept=0, colour="grey80")+
   base_theme+
-  facet_grid(threshold~type) +
+  facet_grid(type~threshold) +
   theme(legend.position = "none") + 
   labs(x="Amplicon length",
        y="Successfully identified") +
@@ -1741,7 +1587,7 @@ gg.acf <- acf %>%
   ggplot(aes(x = distances, y=value)) +
   geom_line(colour="darkslateblue") +
   base_theme+
-  facet_grid(threshold~.) +
+  facet_grid(~threshold) +
   theme(legend.position = "none") + 
   labs(x="Phylogenetic distance",
        y="Pearson correlation") +
@@ -1778,25 +1624,27 @@ library(ggrepel)
 
 gg.bad_clades <- bad_clades %>% 
   ggplot(aes(x= mean_depth_pos_clades, y=traits_per_pos_clades, colour=mean_depth_pos_clades)) + 
-  geom_point(alpha=0.1) + 
+  geom_point(alpha=0.2) + 
   geom_point(data = bad_clades_labels, aes(x=mean_depth_pos_clades, y=traits_per_pos_clades), colour="red")+
   geom_text_repel(data = bad_clades_labels, aes(x=mean_depth_pos_clades, y=traits_per_pos_clades, label= subtree_taxonomy), colour="red")+
   scale_y_log10()+
   scale_colour_gradient(low ="darkslateblue", high ="firebrick", na.value = "grey") +
-    facet_grid(threshold~.) +
+    facet_grid(~threshold) +
   base_theme+
   theme(legend.position = "none") + 
     labs(x="Mean phylogenetic depth",
-         y="Number of descendants")
+         y="Failed IDs")
 
 # Or could pull out the positive clades, then get the descnedants for htem
 
 
 # Plot figure 4 
-Fig4a <- plotvec[[1]] / plotvec[[2]] / plotvec[[3]] / plotvec[[4]]
-Fig4b <- gg.id + gg.acf + gg.bad_clades + plot_layout(widths = c(3,1,1))
+#Fig4a <- plotvec[[1]] / plotvec[[2]] / plotvec[[3]] / plotvec[[4]]
+#Fig4b <- gg.id + gg.acf + gg.bad_clades + plot_layout(widths = c(3,1,1))
 
-Fig4 <- Fig4a - Fig4b + plot_layout(widths = c(1,3))
+#Fig4 <- Fig4a - Fig4b + plot_layout(widths = c(1,3)) + plot_annotation(tag_levels = "A")
+
+Fig4 <-  gg.id / gg.acf / gg.bad_clades + plot_layout(heights = c(2,1,1)) + plot_annotation(tag_levels = "A")
 
 pdf(file="fig/Fig4_id_success.pdf", width = 11, height = 8 , paper="a4r")
   plot(Fig4)
@@ -2174,11 +2022,79 @@ pdf(file="fig/Fig5_mismatch.pdf", width = 8, height = 11 , paper="a4")
   plot(Fig5)
 try(dev.off(), silent=TRUE)
  
+## Supplementary plot of unimputed mismatch
+  
+  
+# Plot heatmap
+gg.mismatch_un <- imputed %>%
+  left_join(p2$data %>% dplyr::select(label, y) %>% dplyr::rename(Genus = label)) %>%
+  mutate( primer = factor(primer, levels=primer_orders$primer)) %>%     
+  ggplot(aes(x = primer, y = y, fill = sum)) +
+    geom_raster() +
+  #scale_fill_distiller(palette = 'RdYlBu', limits = c(0, 200), oob = scales::squish)+
+    scale_fill_gradient(low = "darkslateblue", high = "firebrick", na.value = "grey", limits = c(0, 200), oob = scales::squish) +
+    facet_grid(~strand, scales="free", space="free", drop=TRUE) +
+    #theme_classic() + 
+    theme(
+      axis.text.x = element_blank(),
+      axis.ticks = element_blank(),
+      axis.text.y = element_blank(),
+      axis.title = element_blank(),
+      strip.text.y = element_text(angle = 0),
+      #strip.background = element_rect(fill="grey10"),
+      legend.position = "none"
+    ) + 
+  scale_y_continuous(expand=c(0,0))+ 
+  scale_x_discrete(expand=c(0,0))
+
+# plot tip dist (missing data), mean mismatch, evenness of mismatch, and degeneracy
+library(DescTools)
+
+gg.primer_stats_un <- imputed %>%
+   mutate(primer = factor(primer, levels=primer_orders$primer)) %>%     
+  group_by(primer, strand) %>%
+  summarise(
+    tip_dist = mean(tip_dist),
+    mean_mismatch = mean(sum, na.rm=TRUE),
+    gini_mismatch = Gini(sum),
+    degeneracy = mean(degeneracy)
+    ) %>%
+  pivot_longer(3:6, 
+               names_to="measure",
+               values_to="value") %>%
+  mutate(measure = factor(measure, levels = c("mean_mismatch", "gini_mismatch", "degeneracy", "tip_dist"))) %>%
+  group_by(measure) %>%
+  mutate(cols = value) %>%
+  mutate_at(c("cols"),  ~ . / max(.) ) %>%
+  ggplot(aes(x = primer, y = value, fill=cols)) +
+    geom_col() +
+    scale_fill_gradient(low = "darkslateblue", high = "firebrick", na.value = "grey",  oob = scales::squish) +
+    facet_grid(measure~strand, scales="free", switch="y", drop=TRUE) +
+  base_theme+
+    theme(
+      axis.title.y = element_blank(),
+      axis.text.y = element_blank(),
+      axis.ticks.y = element_blank(),
+      strip.text.x = element_blank(),
+      strip.text.y = element_text(angle=0),
+      legend.position = "none"
+    ) + 
+  scale_y_continuous(expand=c(0,0))+ 
+  scale_x_discrete(expand=c(0,0))
+
+sup3a <- p3 + gg.mismatch_un + gg.density + plot_layout(widths = c(1,4,0.25))
+sup3b <- plot_spacer() + gg.primer_stats_un + plot_spacer() + plot_layout(widths = c(1,4,0.25))
+
+sup3 <- sup3a / sup3b + plot_layout(heights = c(7, 1))
+
+sup3
+pdf(file="fig/supplementary/sup_mismatch.pdf", width = 8, height = 11 , paper="a4")
+  plot(sup3)
+try(dev.off(), silent=TRUE)
 ```
 
 # ACF Mismatch
 ```{r autocrrelation}
-
 tree <- ape::read.tree("reference/trees/ultrametric_insecta_tree_order_constrained.nwk")
 
 primer_mismatch <- vroom::vroom("primer_evaluation/mismatch_all.csv.gz",delim = ",") %>% 
@@ -2218,13 +2134,13 @@ for (i in 1:length(uprimers)){
   # Autocorrelation funciton
   acf <- castor::get_trait_acf(subset_tree, tip_states, Npairs=1e8, Nbins=100)
   
-  # Trait depth
-  tip_states_binary <- tip_states
-  tip_states_binary[tip_states_binary >0] <- 1
-  consentrait <- get_trait_depth(subset_tree, tip_states_binary,
-                                 min_fraction = 0.9, #90% of clade must be insufficiently ID'd to be problmeatic
-                                 count_singletons=TRUE, weighted=FALSE, Npermutations = 1000)
-  
+ # # Trait depth
+ # tip_states_binary <- tip_states
+ # tip_states_binary[tip_states_binary >0] <- 1
+ # consentrait <- get_trait_depth(subset_tree, tip_states_binary,
+ #                                min_fraction = 0.9, #90% of clade must be insufficiently ID'd to be problmeatic
+ #                                count_singletons=TRUE, weighted=FALSE, Npermutations = 1000)
+ # 
   # Create output data frame
   acfvec[[i]] <- data.frame(
     distances = acf$distances,
@@ -2233,12 +2149,12 @@ for (i in 1:length(uprimers)){
     acf_mean_rel = acf$mean_rel_differences,
     acf_npairs = acf$Npairs_per_distance)
   
-  pos_clades <- consentrait$positive_clades
-  traitvec[[i]] <-  data.frame(
-    pos_clade_id = pos_clades,
-    traits_per_pos_clades = consentrait$positives_per_clade[pos_clades],
-    mean_depth_pos_clades = consentrait$mean_depth_per_clade[pos_clades]
-  )
+ #pos_clades <- consentrait$positive_clades
+ #traitvec[[i]] <-  data.frame(
+ #  pos_clade_id = pos_clades,
+ #  traits_per_pos_clades = consentrait$positives_per_clade[pos_clades],
+ #  mean_depth_pos_clades = consentrait$mean_depth_per_clade[pos_clades]
+ #)
 }
 
 acf <- acfvec %>%
@@ -2252,10 +2168,22 @@ vroom::vroom_write(consentrait, "primer_evaluation/consentrait_mismatch.csv.gz",
 
 
 acf <- vroom::vroom("primer_evaluation/acf_mismatch.csv.gz") %>%
-    filter(acf_npairs > 0) 
+    filter(acf_npairs > 0)  %>%
 
-gg.all_acf <- acf %>%
-  left_join(primers %>% mutate(primer = name)) %>%
+# Load primers
+primers <- read_csv("primer_evaluation/primer_candidates.csv") %>%
+  mutate(seq = str_replace_all(seq, "I","N")) %>% 
+  select(-score, -issues, primer= name) %>%
+  distinct() %>%
+  left_join(primer_mismatch %>%
+  group_by(primer) %>%
+  summarise(
+    mean_mismatch = mean(values, na.rm=TRUE)
+    )
+  )
+
+gg.facf <- acf %>%
+  left_join(primers) %>%
   select(-acf_npairs) %>%
   group_by(primer) %>%
   pivot_longer(starts_with("acf_"),
@@ -2263,14 +2191,47 @@ gg.all_acf <- acf %>%
                values_to="value") %>%
   ungroup() %>%
  filter(type == "acf_acf", strand=="F") %>%
+  mutate(new_order = factor(primer, levels = unique(primer[order(mean_mismatch)]))) %>%
+#  mutate(primer = fct_reorder(primer, mean_mismatch)) %>%
 ggplot(aes(x = distances, y=value)) +
   geom_line(alpha=1, colour="black") +
-  theme_void() +
-  facet_grid(primer~strand, drop = TRUE, scales="free_x") 
+  geom_text(data=primers %>%
+              filter(strand=="F") %>%
+              mutate(new_order = factor(primer, levels = unique(primer[order(mean_mismatch)]))), aes(label = paste0("MM:", round(mean_mismatch,1)), x=2, y=-0.6), inherit.aes = FALSE, colour="red", hjust=0, check_overlap = TRUE) +
+  base_theme +
+  facet_wrap(~new_order) +
+  labs(y = "Pearson correlation",
+       x = "Phylogenetic distance",
+       title = "Forward primers")
+
+gg.racf <- acf %>%
+  left_join(primers) %>%
+  select(-acf_npairs) %>%
+  group_by(primer) %>%
+  pivot_longer(starts_with("acf_"),
+               names_to="type",
+               values_to="value") %>%
+  ungroup() %>%
+ filter(type == "acf_acf", strand=="R") %>%
+  mutate(new_order = factor(primer, levels = unique(primer[order(mean_mismatch)]))) %>%
+#  mutate(primer = fct_reorder(primer, mean_mismatch)) %>%
+ggplot(aes(x = distances, y=value)) +
+  geom_line(alpha=1, colour="black") +
+  geom_text(data=primers %>%
+              filter(strand=="R") %>%
+              mutate(new_order = factor(primer, levels = unique(primer[order(mean_mismatch)]))), aes(label = paste0("MM:", round(mean_mismatch,1)), x=2, y=-0.6), inherit.aes = FALSE, colour="red", hjust=0, check_overlap = TRUE) +
+  base_theme +
+  facet_wrap(~new_order) +
+  labs(y = "Pearson correlation",
+       x = "Phylogenetic distance",
+       title = "Reverse primers")
+
+
+gg.all_acf <- gg.facf + gg.racf
 
 gg.all_acf
 
- pdf(file="fig/supplementary/all_acf.pdf", width = 8, height = 11 , paper="a4")
+pdf(file="fig/supplementary/all_acf.pdf", width = 11, height = 8 , paper="a4r")
   plot(gg.all_acf)
 try(dev.off(), silent=TRUE)
   
