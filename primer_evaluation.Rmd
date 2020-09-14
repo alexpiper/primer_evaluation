@@ -1335,172 +1335,9 @@ gg.id
 
 ```
 
-## ID success on tree
-
-for this we will analyse just the LCO HCO data. Will need to take in the raw amplicons data
-
-Arrange this on the tree and see how much phylogenetic signal there is
+## ID Success phylo
 
 ```{r ID success on tree}
-# get Lineage for tree
-seqs <- insect::readFASTA("reference/merged_final.fa.gz")
-
-seqs <- acc2hex(seqs)
-
-lineage <- names(seqs) %>%
-  str_split_fixed(pattern="\\|", n = 2) %>%
-  as_tibble() %>%
-  separate(V2, into=c("taxid","Kingdom", "Phylum", 
-    "Class", "Order", "Family", "Genus", "Species"), sep=";") %>%
-  dplyr::rename(acc = V1)%>%
-  mutate(Species = Species %>% str_replace_all(" ", "_")) %>%
-  dplyr::select(-Species)
-
-upper_lineage <- c(0.97, 0.98,0.99,1) %>%
-      purrr::map(~{
-        lineage %>% select(-taxid, -acc) %>%
-          distinct() %>%
-          mutate(threshold = .x)
-      }) %>%
-      bind_rows()
-
-# Get mixed clusters for the LCO-HCO gene region
-folmer_id <- vroom::vroom("primer_evaluation/amplicons/usearch_output/LCO1490_HCO2198.txt.gz",
-                          delim="\t", col_names = c("acc1", "acc2", "dist")) %>%
-    dplyr::mutate(spp1 = acc1 %>%
-                    str_remove(";$") %>%
-                    str_remove("^.*;"),
-                  acc1 = acc1 %>% str_remove(";.*$"),
-                  spp2 = acc2 %>%
-                    str_remove(";$") %>%
-                    str_remove("^.*;"),
-                  acc2 = acc2 %>% str_remove(";.*$"),
-                  dist = round(dist, 2)) %>%
-    mutate(threshold = 1-dist) %>%
-    filter(threshold %in% c(0.97, 0.98,0.99,1)) %>%
-    dplyr::filter(!spp1==spp2)%>%
-    dplyr::group_by(threshold, spp1) %>% 
-    dplyr::summarise(mixed=n_distinct(spp2)) %>%
-    ungroup() %>%
-    mutate(Genus = spp1 %>% str_remove(" .*$")) 
-
-folmer_id <- folmer_id %>%
-    right_join(upper_lineage) %>%
-    mutate(mixed = replace_na(mixed, 0)) %>%
-    group_by(Family, threshold) %>%
-    dplyr::summarise(mixed=mean(mixed)) # Could do sum instead
-
-# Arrange on tree
-tree <- ape::read.tree("reference/trees/ultrametric_insecta_tree_order_constrained.nwk")
-
-# Prune tree to genus
-tips_to_keep <- tree$tip.label %>% 
-  enframe() %>% 
-  tidyr::separate(value, into=c("acc", "Species"), sep="\\|") %>%
-  left_join(lineage, by="acc") %>%
-  filter(!is.na(Family)) %>%
-  group_by(Family) %>%
-  dplyr::slice(1) %>%
-  ungroup() %>%
-  mutate(tips = paste0(acc,"|", Species))
-
-
-#Get subtree of only genera
-genus_tree  <- castor::get_subtree_with_tips(tree,
-                                          only_tips = tips_to_keep$tips,
-                                          collapse_monofurcations=TRUE,
-                                          force_keep_root=TRUE)$subtree
-
-
-#Prune names to Family
-genus_tree$tip.label <- genus_tree$tip.label %>%
-  str_remove("\\|.*$")%>%
-  enframe() %>%
-  mutate(acc = value)%>%
-  left_join(lineage) %>%
-  pull(Family)
-
-# Filter id sucess to just those in tree
-folmer_id_filtered <- folmer_id %>%
-  dplyr::filter(Family %in%  genus_tree$tip.label)
-
-Ntips 	<- length(genus_tree$tip.label)
-Nnodes 	<- genus_tree$Nnode
-cat(sprintf("Tree has %d nodes, %d tips and %d edges\n",Nnodes,Ntips,nrow(genus_tree$edge)));
-
-# create internal node labels
-genus_tree$node.label <- NA
-if(is.na(genus_tree$node.label)){
-	cat(sprintf("Adding node labels to full tree..\n"))
-	genus_tree$node.label = paste("node.", 1:Nnodes, sep = "") # don't use underscores, because some tree readers (e.g. rncl) interpret them as spaces
-}
-
-# replace zero-length edges
-if(any(genus_tree$edge.length==0)){
-  epsilon = 0.1*min(genus_tree$edge.length[genus_tree$edge.length>0])
-	cat(sprintf("Note: Some edges have length zero, which may break some of the HSP routines. Replacing zero-lengths with a tiny positive length (%g)..\n",epsilon))
-	genus_tree$edge.length[genus_tree$edge.length==0] = epsilon
-}
-
-# Plot tree
-
-# Loop over all different dists
-thresholds <- unique(folmer_id_filtered$threshold)
-plotvec <- vector("list", length = length(thresholds))
-names(plotvec) <- thresholds
-
-i=1
-for(i in 1:length(thresholds)){
-
-    p1 <- ggtree(genus_tree , ladderize=TRUE, aes(colour=values), layout = "circular") 
-  
-  weights_p1 <- p1$data %>%
-    left_join(folmer_id_filtered %>% 
-                filter(threshold == thresholds[i]) %>%
-                select(-threshold) %>%
-                dplyr::rename(label = Family, values = mixed))%>%
-    mutate(values = values %>% replace_na(0))
-                
-      
-  tip_states <- weights_p1 %>%
-    dplyr::filter(isTip) %>%
-    pull(values)
-  names(tip_states) <- weights_p1 %>%
-    dplyr::filter(isTip) %>%
-    pull(label)
-  
-  weights_p1$values[!weights_p1$isTip] <- castor::asr_independent_contrasts(tree=genus_tree,
-                                                          tip_states=tip_states, check_input = FALSE)$ancestral_states
-
-  p2 <- p1 %<+% weights_p1 +
-    scale_color_gradient(low="darkslateblue", high="firebrick",na.value = NA, limits = c(0,5), oob = scales::squish) +
-    theme(legend.position = "none") + 
-    scale_y_continuous(expand=c(0,0))+ 
-    scale_x_discrete(expand=c(0,0)) 
-  
-  # Add heatmap
-  plot_dat <- p1$data %>%
-    left_join(folmer_id_filtered %>%
-    filter(threshold == thresholds[i]) %>%
-    select(-threshold) %>%
-    dplyr::rename(label = Family, values = mixed)) %>%
-    mutate(values = values %>% replace_na(0)) %>% #Use 1 to not mess with log10 transform
-    filter(!is.na(label)) %>%
-    column_to_rownames("label") %>%
-    select(values) %>%
-    as.data.frame()
-  
-  
-  p3 <- gheatmap(p2,plot_dat, offset=0, width=.1, color=NA, legend_title = NA, colnames  = FALSE,
-    colnames_angle=95, colnames_offset_y = 0) +
-    #scale_fill_viridis_c(option="C", name="Pest Spp.", trans="log10")  #, trans="log10"
-    scale_fill_gradient(low="darkslateblue", high="firebrick",na.value = NA, limits = c(0,5), oob = scales::squish)+
-    theme(legend.position = "none")
-  
-  plotvec[[i]] <- p2
-
-}
-
 # Autocorrelation
 tree <- ape::read.tree("reference/trees/ultrametric_insecta_tree_order_constrained.nwk")
 
@@ -1519,17 +1356,16 @@ folmer_id_spp <- vroom::vroom("primer_evaluation/amplicons/usearch_output/LCO149
     mutate(threshold = 1-dist) %>%
     filter(threshold %in% c(0.97, 0.98,0.99,1)) %>%
     dplyr::filter(!spp1==spp2)%>%
-    dplyr::group_by(threshold, spp1) %>% 
-    dplyr::summarise(mixed=n_distinct(spp2), acc1) %>%
+    dplyr::group_by(threshold, acc1, spp1) %>% 
+    dplyr::summarise(mixed=n_distinct(spp2)) %>%
     ungroup() %>%
   mutate(tips = paste0(acc1 %>% str_remove("\\|.*$") %>% acc2hex(.), "|", spp1 %>% str_replace_all(" ", "_"))) %>%
   select(threshold, tips, values = mixed)
 
+
 thresholds <- unique(folmer_id_spp$threshold)
-acfvec <- vector("list", length = length(thresholds))
-names(acfvec) <- thresholds
-traitvec <- vector("list", length = length(thresholds))
-names(traitvec) <- thresholds
+acfvec <- traitvec <- trait_signif <- vector("list", length = length(thresholds))
+names(acfvec) <- names(traitvec) <- names(trait_signif) <- thresholds
 
 i=1
 for(i in 1:length(thresholds)){
@@ -1570,16 +1406,31 @@ for(i in 1:length(thresholds)){
     traits_per_pos_clades = consentrait$positives_per_clade[pos_clades],
     mean_depth_pos_clades = consentrait$mean_depth_per_clade[pos_clades]
   )
+  
+  trait_signif[[i]] <- data.frame(
+    mean_depth = consentrait$mean_depth,
+    var_depth  = consentrait$var_depth,
+    min_depth = consentrait$min_depth,
+    max_depth = consentrait$max_depth,
+    n_pos = consentrait$Npositives,
+    pval = consentrait$P,
+    null_depth = consentrait$mean_random_depth
+  )
 
 }
 
+# Phylogenetic conservatism
+trait_signif%>%
+  bind_rows(.id="threshold") %>%
+  mutate(stdev = sqrt(var_depth))
+
+# Autocorrelation
 acf <- acfvec %>%
   bind_rows(.id="threshold") %>%
   group_by(threshold) %>%
   pivot_longer(starts_with("acf_"),
                names_to="type",
                values_to="value")
-
 
 
 gg.acf <- acf %>% 
@@ -1607,15 +1458,17 @@ bad_clades_labels <- bad_clades %>%
   arrange(desc(traits_per_pos_clades),desc(mean_depth_pos_clades), .by_group = TRUE) %>%
   rownames_to_column("rank") %>%
   mutate(rank = as.numeric(rank)) %>%
-    top_n(-5, rank) %>%
+    top_n(-10, rank) %>%
     #top_frac(-.001, rank) %>%
+  ungroup() %>%
   mutate(subtree_taxonomy = map(pos_clade_id,function(x){
     subtree <- castor::get_subtree_at_node(tree, x-Ntip(tree))$subtree
     taxonomy <- subtree$tip.label %>%
       enframe() %>%
       mutate(acc= value %>% str_remove("\\|.*$"))%>%
       left_join(lineage, by="acc")
-    names(which.max(table(taxonomy$Family)))
+    print(unique(taxonomy$Genus))
+    names(which.max(table(taxonomy$Genus)))
   }))%>% 
   unnest(subtree_taxonomy) %>%
   filter(!duplicated(subtree_taxonomy))
@@ -1627,15 +1480,12 @@ gg.bad_clades <- bad_clades %>%
   geom_point(alpha=0.2) + 
   geom_point(data = bad_clades_labels, aes(x=mean_depth_pos_clades, y=traits_per_pos_clades), colour="red")+
   geom_text_repel(data = bad_clades_labels, aes(x=mean_depth_pos_clades, y=traits_per_pos_clades, label= subtree_taxonomy), colour="red")+
-  scale_y_log10()+
   scale_colour_gradient(low ="darkslateblue", high ="firebrick", na.value = "grey") +
     facet_grid(~threshold) +
   base_theme+
   theme(legend.position = "none") + 
-    labs(x="Mean phylogenetic depth",
-         y="Failed IDs")
-
-# Or could pull out the positive clades, then get the descnedants for htem
+    labs(x="Phylogenetic depth of clade",
+         y="# Failed ID's (Full length)")
 
 
 # Plot figure 4 
@@ -1644,7 +1494,7 @@ gg.bad_clades <- bad_clades %>%
 
 #Fig4 <- Fig4a - Fig4b + plot_layout(widths = c(1,3)) + plot_annotation(tag_levels = "A")
 
-Fig4 <-  gg.id / gg.acf / gg.bad_clades + plot_layout(heights = c(2,1,1)) + plot_annotation(tag_levels = "A")
+Fig4 <-  gg.id /  gg.bad_clades / gg.acf + plot_layout(heights = c(4,2,1)) + plot_annotation(tag_levels = "A")
 
 pdf(file="fig/Fig4_id_success.pdf", width = 11, height = 8 , paper="a4r")
   plot(Fig4)
