@@ -66,17 +66,17 @@ source("R/themes.R")
 ## Download data for all insecta
 
 ```{r retrieve sequences, eval=FALSE, include=FALSE}
-dir.create("reference/insecta/genbank",  recursive = TRUE)
-dir.create("reference/insecta/bold",  recursive = TRUE)
+dir.create("reference/database_builder/insecta/genbank",  recursive = TRUE)
+dir.create("reference/database_builder/insecta/bold",  recursive = TRUE)
 
 ## Fetch sequences from GenBank
-genbank <- fetchSeqs("Insecta", database = "genbank", out.dir="reference/insecta/genbank", downstream = "Order", quiet=FALSE, marker="COI OR COI OR COX1 OR COXI", output = "gb-binom", compress=TRUE, multithread=TRUE, force=TRUE)
+genbank <- fetchSeqs("Insecta", database = "genbank", out.dir="reference/database_builder/insecta/genbank", downstream = "Order", quiet=FALSE, marker="COI OR COI OR COX1 OR COXI", output = "gb-binom", compress=TRUE, multithread=TRUE, force=TRUE)
 
 ## Fetch sequences from BOLD
-bold <- fetchSeqs("Insecta", database="bold", out.dir="reference/insecta/bold", downstream = "Family", quiet=FALSE, marker="COI-5P", output = "gb-binom", compress=TRUE, multithread=TRUE, force=TRUE)
+bold <- fetchSeqs("Insecta", database="bold", out.dir="reference/database_builder/insecta/bold", downstream = "Family", quiet=FALSE, marker="COI-5P", output = "gb-binom", compress=TRUE, multithread=TRUE, force=TRUE)
 
 ## Fetch mitochondrial genomes from genbank
-fetchSeqs("Insecta", database="genbank", out.dir="reference/insecta/genbank", quiet=FALSE, marker="mitochondria", output = "gb-binom", compress=TRUE, multithread=TRUE, force=TRUE)
+fetchSeqs("Insecta", database="genbank", out.dir="reference/database_builder/insecta/genbank", quiet=FALSE, marker="mitochondria", output = "gb-binom", compress=TRUE, multithread=TRUE, force=TRUE)
 
 ```
 
@@ -84,17 +84,17 @@ fetchSeqs("Insecta", database="genbank", out.dir="reference/insecta/genbank", qu
 
 ```{r retrieve arachnid seqs, eval=FALSE, include=FALSE}
 #Create directories
-dir.create("reference/arachnida/genbank",  recursive = TRUE)
-dir.create("reference/arachnida/bold", recursive = TRUE)
+dir.create("reference/database_builder/arachnida/genbank",  recursive = TRUE)
+dir.create("reference/database_builder/arachnida/bold", recursive = TRUE)
 
 ## Fetch sequences from GenBank 
-fetchSeqs("Arachnida", database="genbank", out.dir="reference/arachnida/genbank", downstream="Order", quiet=FALSE, output = "gb-binom", compress=TRUE, multithread=TRUE, force=TRUE)
+fetchSeqs("Arachnida", database="genbank", out.dir="reference/database_builder/arachnida/genbank", downstream="Order", quiet=FALSE, output = "gb-binom", compress=TRUE, multithread=TRUE, force=TRUE)
 
 ## Fetch sequences from BOLD
-fetchSeqs("Arachnida", database="bold", out.dir="reference/arachnida/bold", downstream=TRUE, quiet=FALSE, downto="Order", marker="COI-5P", output = "gb-binom",compress=TRUE, multithread=TRUE, force=TRUE)
+fetchSeqs("Arachnida", database="bold", out.dir="reference/database_builder/arachnida/bold", downstream=TRUE, quiet=FALSE, downto="Order", marker="COI-5P", output = "gb-binom",compress=TRUE, multithread=TRUE, force=TRUE)
 
 ## Fetch mitochondrial genomes from genbank
-fetchSeqs("Arachnida", database="genbank", out.dir="reference/arachnida/genbank", quiet=FALSE, marker="mitochondria", output = "gb-binom", compress=TRUE, multithread=TRUE, force=TRUE)
+fetchSeqs("Arachnida", database="genbank", out.dir="reference/database_builder/arachnida/genbank", quiet=FALSE, marker="mitochondria", output = "gb-binom", compress=TRUE, multithread=TRUE, force=TRUE)
 
 ```
 
@@ -103,31 +103,31 @@ fetchSeqs("Arachnida", database="genbank", out.dir="reference/arachnida/genbank"
 
 ```{r merge and clean}
 #Merge Genbank sequences
-list.files("reference/insecta/genbank/", pattern = ".fa$|.fa.gz$", full.names = TRUE, recursive = TRUE) %>% 
+list.files("reference/database_builder/insecta/genbank/", pattern = ".fa$|.fa.gz$", full.names = TRUE, recursive = TRUE) %>% 
   purrr::map(readDNAStringSet) %>%
-  purrr::map(writeXStringSet, filepath="reference/insecta/genbank/genbank_insecta_COI_COI_COX1_COXI_20200728.fa", append=TRUE, width=20000)
+  purrr::map(writeXStringSet, filepath="reference/database_builder/insecta/genbank/genbank_insecta_COI_COI_COX1_COXI_20200728.fa", append=TRUE, width=20000)
 
 #Merge BOLD sequences
-list.files("reference/insecta/bold/", pattern = ".fa$|.fa.gz$", full.names = TRUE, recursive = TRUE) %>% 
+list.files("reference/database_builder/insecta/bold/", pattern = ".fa$|.fa.gz$", full.names = TRUE, recursive = TRUE) %>% 
   purrr::map(readDNAStringSet) %>%
-  purrr::map(writeXStringSet, filepath="reference/insecta/bold/bold_insecta_coi5p_20200728.fa", append=TRUE, width=20000)
+  purrr::map(writeXStringSet, filepath="reference/database_builder/insecta/bold/bold_insecta_coi5p_20200728.fa", append=TRUE, width=20000)
 
 #Merge Genbank sequences
-list.files("reference/arachnida/genbank/", pattern = ".fa$|.fa.gz$", full.names = TRUE, recursive = TRUE) %>% 
+list.files("reference/database_builder/arachnida/genbank/", pattern = ".fa$|.fa.gz$", full.names = TRUE, recursive = TRUE) %>% 
   purrr::map(readDNAStringSet) %>%
-  purrr::map(writeXStringSet, filepath="reference/arachnida/genbank/genbank_arachnida_COI_COI_COX1_COXI_20200728.fa", append=TRUE, width=20000)
+  purrr::map(writeXStringSet, filepath="reference/database_builder/arachnida/genbank/genbank_arachnida_COI_COI_COX1_COXI_20200728.fa", append=TRUE, width=20000)
 
 #Merge BOLD sequences
-list.files("reference/arachnida/bold/", pattern = ".fa$|.fa.gz$", full.names = TRUE, recursive = TRUE) %>% 
+list.files("reference/database_builder/arachnida/bold/", pattern = ".fa$|.fa.gz$", full.names = TRUE, recursive = TRUE) %>% 
   purrr::map(readDNAStringSet) %>%
-  purrr::map(writeXStringSet, filepath="reference/arachnida/bold/bold_arachnida_coi5p_20200728.fa", append=TRUE, width=20000)
+  purrr::map(writeXStringSet, filepath="reference/database_builder/arachnida/bold/bold_arachnida_coi5p_20200728.fa", append=TRUE, width=20000)
 
 #gzip merged files
 mergedfiles <- c(
-  "reference/insecta/genbank/genbank_insecta_COI_COI_COX1_COXI_20200728.fa",
-  "reference/insecta/bold/bold_insecta_coi5p_20200728.fa",
-  "reference/arachnida/genbank/genbank_arachnida_COI_COI_COX1_COXI_20200728.fa",
-  "reference/arachnida/bold/bold_arachnida_coi5p_20200728.fa"
+  "reference/database_builder/insecta/genbank/genbank_insecta_COI_COI_COX1_COXI_20200728.fa",
+  "reference/database_builder/insecta/bold/bold_insecta_coi5p_20200728.fa",
+  "reference/database_builder/arachnida/genbank/genbank_arachnida_COI_COI_COX1_COXI_20200728.fa",
+  "reference/database_builder/arachnida/bold/bold_arachnida_coi5p_20200728.fa"
 ) 
 
 #gzip all merged files
@@ -135,21 +135,21 @@ mergedfiles %>%
   purrr::map(R.utils::gzip)
 
 #Remove seperate sequences
-allfiles <- c(list.files("reference/insecta", pattern = ".fa$|.fa.gz$", full.names = TRUE, recursive = TRUE),
-  list.files("reference/insecta", pattern = ".fa$|.fa.gz$", full.names = TRUE, recursive = TRUE))
+allfiles <- c(list.files("reference/database_builder/insecta", pattern = ".fa$|.fa.gz$", full.names = TRUE, recursive = TRUE),
+  list.files("reference/database_builder/insecta", pattern = ".fa$|.fa.gz$", full.names = TRUE, recursive = TRUE))
 
 file.remove(allfiles[!allfiles %in% (mergedfiles %>% paste0(., ".gz"))])
 
 #Merge sequences
 seqs <- mergedfiles %>% 
   purrr::map(readDNAStringSet) %>%
-  purrr::map(writeXStringSet, filepath="reference/01_mergedseqs.fa", append=TRUE, width=20000)
-R.utils::gzip("01_reference/mergedseqs.fa")
+  purrr::map(writeXStringSet, filepath="reference/database_builder/01_mergedseqs.fa", append=TRUE, width=20000)
+R.utils::gzip("01_reference/database_builder/mergedseqs.fa")
 
 # Dereplicate duplicated accessions
-seqs <- readDNAStringSet(filepath = "reference/01_mergedseqs.fa.gz")
+seqs <- readDNAStringSet(filepath = "reference/database_builder/01_mergedseqs.fa.gz")
 uniqSeqs <- seqs[!duplicated(str_remove(names(seqs), "\\|.*$")),]
-writeXStringSet(uniqSeqs, "reference/02_uniqSeqs.fa.gz", width=20000, compress=TRUE)
+writeXStringSet(uniqSeqs, "reference/database_builder/02_uniqSeqs.fa.gz", width=20000, compress=TRUE)
 
 ```
 
@@ -163,7 +163,7 @@ taxreturn::download_ott_taxonomy(dest.dir="ott3.2", force=TRUE)
 db <- taxreturn::get_ott_taxonomy(dir="ott3.2", filter_unplaced = FALSE)
 
 ## Map to Open tree of life taxonomy and resolve synonyms
-uniqSeqs <- Biostrings::readDNAStringSet("reference/02_uniqSeqs.fa.gz")
+uniqSeqs <- Biostrings::readDNAStringSet("reference/database_builder/02_uniqSeqs.fa.gz")
 resolved <- map_to_ott(uniqSeqs, db, resolve_synonyms=TRUE, dir="ott3.2", filter_unplaced=TRUE, remove_na = TRUE, quiet=FALSE)
 
 #filter unplaced taxa ie "incertae_sedis,|incertae_sedis$|major_rank_conflict|unplaced|environmental|inconsistent|extinct|hidden|hybrid|not_otu|viral|barren"
@@ -172,10 +172,10 @@ resolved <- filter_unplaced(resolved, db)
 #filter infraspecific taxa
 resolved <- filter_infraspecifc(resolved, db)
 
-insect::writeFASTA(resolved, file="reference/03_resolved.fa.gz", compress=TRUE)
+insect::writeFASTA(resolved, file="reference/database_builder/03_resolved.fa.gz", compress=TRUE)
 
 # Filter any further sequences with problem names
-resolved <- insect::readFASTA("reference/03_resolved.fa.gz")
+resolved <- insect::readFASTA("reference/database_builder/03_resolved.fa.gz")
 names <- names(resolved) %>%
   str_split_fixed(";", n=2) %>%
   as_tibble() %>%
@@ -184,7 +184,7 @@ rem <- names %>%
   dplyr::filter(str_detect(name,                        "sp\\.|spp\\.|aff\\.|nr\\.|bv\\.|cf\\.|nom\\.|nud\\.|environment|undescribed|unverified|unclassified|uncultured|unidentif|[0-9]|[:punct:]")) %>%
   pull(acc)
 name_filtered  <- subset.DNAbin(resolved, subset = !str_replace(names(resolved), "(?:.(?!;))+$", "") %in% rem)
-insect::writeFASTA(name_filtered, file="reference/04_name_filtered.fa.gz", compress=TRUE)
+insect::writeFASTA(name_filtered, file="reference/database_builder/04_name_filtered.fa.gz", compress=TRUE)
 
 
 #CHeck NCBI taxonomy
@@ -192,7 +192,7 @@ insect::writeFASTA(name_filtered, file="reference/04_name_filtered.fa.gz", compr
 #with remove_na=TRUE resolved wont contain any non-mapped
 # While the taxid for all the rest should be NCBI or na?
 
-uniqSeqs <- insect::readFASTA("reference/02_uniqSeqs.fa.gz")
+uniqSeqs <- insect::readFASTA("reference/database_builder/02_uniqSeqs.fa.gz")
 resolved_ncbi <- resolve_synonyms_ncbi(uniqSeqs, dir="ncbi_taxdump")
 
 # need to resolve synonyms and remove infraspecifics for a fair comaprison here for a fair comparison
@@ -205,31 +205,105 @@ mapped_ncbi <- names(resolved_ncbi) %>%
   dplyr::rename(name = V2) %>%
   mutate(db = "ncbi")
 
-mapped_ott <- fasta.index("reference/03_resolved.fa.gz") %>%
+mapped_ott <- fasta.index("reference/database_builder/03_resolved.fa.gz") %>%
 tidyr::separate(desc, into=c("acc", "taxid", "name"), sep="\\||;") %>%
   dplyr::select(acc, taxid, name) %>%
   mutate(taxid = taxid %>% dplyr::na_if("NA")) %>%
   mutate(db = "ott")
 
-joint <- bind_rows(mapped_ncbi, mapped_ott) %>%
+mapping_comparison <- bind_rows(mapped_ncbi, mapped_ott) %>%
   dplyr::filter(!is.na(taxid)) %>%
   dplyr::filter(!str_detect(name,                        "sp\\.|spp\\.|aff\\.|nr\\.|bv\\.|cf\\.|nom\\.|nud\\.|environment|undescribed|unverified|unclassified|uncultured|unidentif|[0-9]|[:punct:]")) %>%
   group_by(db) %>%
   dplyr::summarise(unique_spp = n_distinct(taxid), unique_seqs = n()) 
 
-gg.mapping_comparison <- joint %>%
+gg.mapping_comparison <- mapping_comparison %>%
   pivot_longer(starts_with("unique"),
                names_to="type",
                values_to="value")  %>%
-  ggplot(aes(x=type, y=value, fill=db, group=db)) + 
-           geom_col(position="dodge") +
+  mutate(type = type %>% 
+           str_replace("unique_seqs", "Unique Sequences") %>%
+           str_replace("unique_spp", "Unique Species")
+           )%>%
+    mutate(db = db %>% 
+           str_replace("ncbi", "GenBank") %>%
+           str_replace("ott", "OTT")
+           )%>%
+  ggplot(aes(x=db, y=value, fill=db)) + 
+  geom_col() +
+  geom_text(aes(label = value, y = value), vjust=-0.4)+
   base_theme +
   scale_fill_brewer(palette = "Paired") +
-  labs(title="Mapped into taxonomy") +
+  facet_wrap(~type, scales="free_y") +
+  labs(x = NULL,
+       y = "Successfully mapped into taxonomy",
+       fill="Reference Taxonomy") +
+  scale_y_continuous(labels= scales::label_number_si())+
   theme(legend.position = "bottom")
 
+gg.mapping_comparison
+
+
+  
+# Number of synonyms
+ncbi_syns <- get_ncbi_synonyms(dir ="ncbi_taxdump")
+ott_syns <- taxreturn::parse_ott_synonyms(dir = "ott3.2")
+query <- names(uniqSeqs) %>%
+  stringr::str_split_fixed(";", n = 2) %>% 
+  tibble::as_tibble() %>% 
+  tidyr::separate(col = V1, into = c("acc", "tax_id"), sep = "\\|") %>% 
+            dplyr::rename(query = V2)
+
+syn_comparison <- query %>%
+  dplyr::select(-tax_id) %>%
+  dplyr::mutate(
+    ncbi_syn = case_when(
+      query %in% ncbi_syns$synonym ~ TRUE,
+      TRUE ~ FALSE),
+    ott_syn = case_when(
+      query %in% ott_syns$synonym ~ TRUE,
+      TRUE ~ FALSE),
+    ) %>%
+  pivot_longer(contains("_syn"),
+               names_to="db",
+               values_to="syn")  %>%
+  filter(syn == TRUE) %>%
+  group_by(db) %>%
+  dplyr::summarise(unique_spp = n_distinct(query), unique_seqs = n()) 
+
+# Percentage of dataset
+query %>%
+  summarise(unique_spp = n_distinct(query), unique_seqs = n())
+    
+gg.syn_comparison <- syn_comparison %>%
+  pivot_longer(starts_with("unique"),
+               names_to="type",
+               values_to="value")  %>%
+  mutate(type = type %>% 
+           str_replace("unique_seqs", "Unique Sequences") %>%
+           str_replace("unique_spp", "Unique Species")
+           )%>%
+    mutate(db = db %>% 
+           str_replace("ncbi_syn", "GenBank") %>%
+           str_replace("ott_syn", "OTT")
+           )%>%
+  ggplot(aes(x=db, y=value, fill=db)) + 
+  geom_col() +
+  geom_text(aes(label = value, y = value), vjust=-0.4)+
+  base_theme +
+  scale_fill_brewer(palette = "Paired") +
+  facet_wrap(~type, scales="free_y") +
+  labs(x = NULL,
+       y = "Synonyms resolved",
+       fill="Reference Taxonomy") +
+  scale_y_continuous(labels= scales::label_number_si())+
+  theme(legend.position = "bottom")
+
+gg.ref_comparison <- (gg.mapping_comparison + theme(legend.position = "none")) / gg.syn_comparison + plot_annotation(tag_levels = "A")
+
+gg.ref_comparison
 pdf(file="fig/supplementary/taxonomy_mapping_comparison.pdf", width = 8, height = 11 , paper="a4")
-  plot(gg.mapping_comparison)
+  plot(gg.ref_comparison)
 try(dev.off(), silent=TRUE)
 ```
 
@@ -254,33 +328,33 @@ saveRDS(model, "reference/folmer_fullength_model.rds")
 
 ```{r Align to phmm}
 model <- readRDS("reference/folmer_fullength_model.rds")
-seqs <- insect::readFASTA("reference/04_name_filtered.fa.gz")
+seqs <- insect::readFASTA("reference/database_builder/04_name_filtered.fa.gz")
 
 filtered <- taxreturn::map_to_model(seqs,  model, minscore = 100,
  shave=TRUE, check_indels=TRUE,  maxNs = 0,
  multithread=8, quiet=FALSE, progress = FALSE)
 
 #Write out results filtered results
-insect::writeFASTA(filtered, file="reference/05_filtered.fa.gz",compress=TRUE)
+insect::writeFASTA(filtered, file="reference/database_builder/05_filtered.fa.gz",compress=TRUE)
 
 ```
 
 ## Remove stop codons
 
 ```{r stop codons}
-filtered <- insect::readFASTA("reference/05_filtered.fa.gz")
+filtered <- insect::readFASTA("reference/database_builder/05_filtered.fa.gz")
 
 # Filter for stop codons
 codonfilt <- taxreturn::codon_filter(filtered)
 
 #Write out results filtered results
-insect::writeFASTA(codonfilt, file="reference/06_codon_filtered.fa.gz",compress=TRUE)
+insect::writeFASTA(codonfilt, file="reference/database_builder/06_codon_filtered.fa.gz",compress=TRUE)
 ```
 
 ## Mixed clusters
 
 ```{r Mixed clusters}
-codonfilt <- insect::readFASTA("reference/06_codon_filtered.fa.gz")
+codonfilt <- insect::readFASTA("reference/database_builder/06_codon_filtered.fa.gz")
 
 # Remove duplicate accesions
 seqs <- insect::subset.DNAbin(codonfilt, subset = !duplicated(str_extract(names(codonfilt), "^.*\\|" )))
@@ -328,7 +402,7 @@ rem <- mixed_clusters %>%
 length(rem)
 
 purged  <- subset.DNAbin(seqs, subset = !str_replace(names(seqs), "(?:.(?!;))+$", "") %in% rem)
-insect::writeFASTA(purged, file="reference/07_purged.fa.gz", compress=TRUE)
+insect::writeFASTA(purged, file="reference/database_builder/07_purged.fa.gz", compress=TRUE)
 ```
 
 ## Remove contaminants
@@ -366,7 +440,7 @@ writeXStringSet(human_mito,"reference/contaminants/human_mito.fa")
 # Blast against wolbachia
 taxreturn::blast_install(dest.dir = "bin")
 
-seqs <- insect::readFASTA("reference/07_purged.fa.gz")
+seqs <- insect::readFASTA("reference/database_builder/07_purged.fa.gz")
 
 matchlist_wolb <- taxreturn::blast(query=seqs, db="reference/contaminants/wolbachia_COI_COI_COX1_COXI.fa.gz", output_format = "tabular", multithread = FALSE, args="-perc_identity 80 -max_target_seqs 10 -max_hsps 10") %>%
   as.data.frame()
@@ -419,28 +493,28 @@ table(str_remove(names(seqs), "(?:.(?!\\|))+$") %in% rem)
 contam_purged  <- subset.DNAbin(seqs, subset = !str_remove(names(seqs), "(?:.(?!\\|))+$") %in% rem)
 
 length(seqs) - length(contam_purged)
-insect::writeFASTA(contam_purged, file="reference/08_contam_removed.fa.gz", compress=TRUE)
+insect::writeFASTA(contam_purged, file="reference/database_builder/08_contam_removed.fa.gz", compress=TRUE)
 ```
 
 
 ## Filter length
 
 ```{r lengthfilt}
-contam_purged <- readDNAStringSet("reference/08_contam_removed.fa.gz")
+contam_purged <- readDNAStringSet("reference/database_builder/08_contam_removed.fa.gz")
 
 maxgaps <- 712 - 300 #minlength 300 bases
 
 rem <- names(contam_purged)[Biostrings::letterFrequency(contam_purged, "-") > maxgaps]
 lengthfilt <- contam_purged[!names(contam_purged) %in% rem]
 
-writeXStringSet(lengthfilt, "reference/09_lengthfilt.fa.gz", compress=TRUE)
+writeXStringSet(lengthfilt, "reference/database_builder/09_lengthfilt.fa.gz", compress=TRUE)
 ```
 
 ## Prune overrepresented groups
 ```{R prune}
 # Prune large group sizes down to 5
 set.seed(666)
-lengthfilt <- insect::readFASTA("reference/09_lengthfilt.fa.gz")
+lengthfilt <- insect::readFASTA("reference/database_builder/09_lengthfilt.fa.gz")
 pruned <- prune_groups(lengthfilt, maxGroupSize = 5, discardby="length", dedup=TRUE, quiet = FALSE)
 
 # Reformat to full taxonomic heirarchy
@@ -452,7 +526,7 @@ rem <- names(pruned)[str_detect(names(pruned), ";NA;")]
 subset <- pruned[!names(pruned) %in% rem]
 message(paste0(length(pruned) - length(subset), " Sequences with NA's in taxonomy removed"))
 pruned <- subset
-insect::writeFASTA(pruned, file="reference/10_pruned.fa.gz", compress=TRUE)
+insect::writeFASTA(pruned, file="reference/database_builder/10_pruned.fa.gz", compress=TRUE)
 ```
 
 
@@ -509,7 +583,7 @@ insect::writeFASTA(codonfilt, file="reference/inhouse/inhouse_heirarchial.fa", c
 #merge
 inhouse <- insect::readFASTA("reference/inhouse/inhouse_heirarchial.fa")
 
-mergedSeqs <- c((insect::readFASTA(file="reference/10_pruned.fa.gz")), inhouse)
+mergedSeqs <- c((insect::readFASTA(file="reference/database_builder/10_pruned.fa.gz")), inhouse)
 
 #Remove any non-insect or arachnid as well as duplciate accessions
 mergedSeqs <- filter_by_tax(mergedSeqs, filtrank = "Class", filtvalue =c("Insecta","Arachnida"))
