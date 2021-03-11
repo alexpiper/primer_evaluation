@@ -8,10 +8,10 @@ This repository contains the code required for reproducing the analyses presente
 
 All analyses presented in the manuscript can be found in rmd files in the root directory or rendered below:
 
--   Database curation
+-   [Database curation](https://alexpiper.github.io/primer_evaluation/database_builder.html)
 
--   Phylogenetics
+-   [Phylogenetics](https://alexpiper.github.io/primer_evaluation/phylogenetics.html)
 
--   Pest list assembly
+-   [Pest list assembly](https://alexpiper.github.io/primer_evaluation/pestlist.html)
 
--   Primer evaluation
+-   [Primer evaluation](primer_evaluation.html)
