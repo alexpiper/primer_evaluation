@@ -1,17 +1,24 @@
 ---
-title: "Database builder"
-output: html_notebook
+title: "Metabarcoding primer evaluation"
+subtitle: "Database assembly"
+author: "Alexander Piper"
+date: "`r Sys.Date()`"
+output: html_document
 editor_options: 
   chunk_output_type: console
 ---
 
-# Setup & Packages 
-
-```{r setup}
+```{r setup, include=FALSE}
 # Knitr global setup - change eval to true to run code
 library(knitr)
-knitr::opts_chunk$set(echo = TRUE, eval=FALSE, message=FALSE,error=FALSE,fig.show = "hold", fig.keep = "all")
+knitr::opts_chunk$set(echo = TRUE, eval=FALSE, message=FALSE,error=FALSE, fig.show = "hold", fig.keep = "all")
+opts_chunk$set(dev = 'png')
+```
 
+
+# Load Packages 
+
+```{r load packages}
 #Set required packages
 .cran_packages <- c("usethis",
                     "tidyverse",
@@ -26,7 +33,8 @@ knitr::opts_chunk$set(echo = TRUE, eval=FALSE, message=FALSE,error=FALSE,fig.sho
                     "patchwork",
                     "geiger",
                     "castor",
-                    "phytools")
+                    "phytools",
+                    "scales")
 
 .bioc_packages <- c("DECIPHER",
                     "ggtree",
@@ -153,6 +161,66 @@ writeXStringSet(uniqSeqs, "reference/database_builder/02_uniqSeqs.fa.gz", width=
 
 ```
 
+## Check which could not be mapped
+
+```{r failed mapping}
+mapped_ott <- fasta.index("reference/database_builder/03_resolved.fa.gz") %>%
+  tidyr::separate(desc, into=c("acc", "tax_id", "tax_name"), sep="\\||;") %>%
+  mutate(tax_id = tax_id %>% dplyr::na_if("NA"))
+  
+unmapped <- fasta.index("reference/database_builder/02_uniqSeqs.fa.gz") %>%
+  tidyr::separate(desc, into=c("acc", "tax_id", "name"), sep="\\||;") %>%
+  dplyr::select(acc, tax_id, name) %>%
+  mutate(tax_id = tax_id %>% dplyr::na_if("NA")) %>%
+  filter(!acc %in% mapped_ott$acc)
+
+# Check the types that could nto be mapped
+db <- taxreturn::get_ott_taxonomy(dir="ott3.2", filter_unplaced = FALSE)
+
+unmapped$name %in% db$tax_name %>% table()
+
+unmapped_summary <- unmapped %>% 
+  dplyr::rename(tax_name = name) %>%
+  left_join(db) %>%
+  mutate(type = case_when(
+    str_detect(flags, "incertae_sedis") ~ "incertae_sedis",
+    str_detect(flags, "major_rank_conflict") ~ "major_rank_conflict",
+    str_detect(flags, "unplaced") ~ "unplaced",
+    str_detect(flags, "environmental") ~ "environmental",    
+    str_detect(flags, "infraspecific") ~ "infraspecific",    
+    str_detect(flags, "inconsistent") ~ "inconsistent",    
+    str_detect(flags, "extinct") ~ "extinct",    
+    str_detect(flags, "hidden") ~ "hidden",        
+    str_detect(flags, "hybrid") ~ "hybrid",      
+    str_detect(flags, "not_otu") ~ "not_otu",    
+    str_detect(flags, "viral") ~ "viral",      
+    str_detect(flags, "barren") ~ "barren",
+    str_detect(flags, "sibling_higher") ~ "sibling_higher",
+    is.na(flags) ~ "not_present",
+    TRUE ~ "other"
+  ))
+
+gg.unmapped <- unmapped_summary %>%
+  group_by(type) %>%
+  summarise(n = n()) %>%
+  ggplot(aes(x = type, y=n, fill=type)) + 
+  geom_col()+
+  geom_text(aes(label = n, y = n), vjust=-0.2)+
+  base_theme +
+  scale_fill_brewer(palette = "Paired") +
+  scale_y_log10(labels=scales::label_number_si()) +
+  labs(
+    x = "Type of unmapped sequence",
+    y = "Number of sequences"
+  ) 
+
+gg.unmapped
+
+pdf(file="fig/supplementary/taxon_flags_removed.pdf", width = 8, height = 6 , paper="a4r")
+  plot(gg.unmapped)
+try(dev.off(), silent=TRUE)
+```
+
 
 # Compare taxonomy mapping 
 
@@ -231,7 +299,7 @@ gg.mapping_comparison <- mapping_comparison %>%
            )%>%
   ggplot(aes(x=db, y=value, fill=db)) + 
   geom_col() +
-  geom_text(aes(label = value, y = value), vjust=-0.4)+
+  geom_text(aes(label = value, y = value), vjust=-0.2)+
   base_theme +
   scale_fill_brewer(palette = "Paired") +
   facet_wrap(~type, scales="free_y") +
@@ -239,12 +307,12 @@ gg.mapping_comparison <- mapping_comparison %>%
        y = "Successfully mapped into taxonomy",
        fill="Reference Taxonomy") +
   scale_y_continuous(labels= scales::label_number_si())+
-  theme(legend.position = "bottom")
+  theme(legend.position = "none",
+        axis.text.x = element_blank())
 
 gg.mapping_comparison
 
 
-  
 # Number of synonyms
 ncbi_syns <- get_ncbi_synonyms(dir ="ncbi_taxdump")
 ott_syns <- taxreturn::parse_ott_synonyms(dir = "ott3.2")
@@ -289,7 +357,7 @@ gg.syn_comparison <- syn_comparison %>%
            )%>%
   ggplot(aes(x=db, y=value, fill=db)) + 
   geom_col() +
-  geom_text(aes(label = value, y = value), vjust=-0.4)+
+  geom_text(aes(label = value, y = value), vjust=-0.2)+
   base_theme +
   scale_fill_brewer(palette = "Paired") +
   facet_wrap(~type, scales="free_y") +
@@ -297,12 +365,12 @@ gg.syn_comparison <- syn_comparison %>%
        y = "Synonyms resolved",
        fill="Reference Taxonomy") +
   scale_y_continuous(labels= scales::label_number_si())+
-  theme(legend.position = "bottom")
+  theme(legend.position = "none")
 
 gg.ref_comparison <- (gg.mapping_comparison + theme(legend.position = "none")) / gg.syn_comparison + plot_annotation(tag_levels = "A")
 
 gg.ref_comparison
-pdf(file="fig/supplementary/taxonomy_mapping_comparison.pdf", width = 8, height = 11 , paper="a4")
+pdf(file="fig/supplementary/taxonomy_mapping_comparison.pdf", width = 10, height = 8 , paper="a4r")
   plot(gg.ref_comparison)
 try(dev.off(), silent=TRUE)
 ```
@@ -650,88 +718,4 @@ names(heirarchial) %>%
   magrittr::set_colnames(c("total","root", "kingdom", "phylum", "class", "order", "family", "genus", "species")) %>%
   dplyr::summarise_at(c("total","root", "kingdom", "phylum", "class", "order", "family", "genus", "species"), n_distinct)%>%
   write_csv("reference/classifiers/insecta_hierarchial_summary.csv")
-```
-
-
-# Evaluate LCA
-
-### Creat USEARCH distance matrix
-
-### Index jobs and submit usearch
-```{bash generate job index}
-#!/bin/bash
-ls -d $PWD/reference/*  | grep 'merged_final' | sort -u > sequence_index.txt
-
-sbatch --array=1-2 bash/usearch_distmat.sh
-```
-
-### Evaluate LCA
-```{r evaluate LCA}
-## Get LCA probs
-ranks = c("kingdom", 
-    "phylum", "class", "order", "family", 
-    "genus", "species")
-
-# Has to be a neater way to do this? Did recently in taxreturn
-
-lca_probs <- fs::dir_ls(path="reference/usearch_output/", glob = "*.txt.gz") %>%
-  purrr::map(function(x){
-    print(x)
-    vroom::vroom(x, delim="\t", col_names = c("acc1", "acc2", "dist")) %>%
-    dplyr::mutate(acc1 = acc1 %>%
-                    str_remove(";$"),
-                  acc2 = acc2 %>%
-                    str_remove(";$"),
-      dist = round(dist, 2),
-                  ) %>%
-    group_by(dist) %>%
-    group_modify(~{
-      print(unique(.x$dist))
-      
-      df1 <- .x %>%
-      tidyr::separate(acc1, into=c("Acc",ranks), sep=";") %>%
-      dplyr::select(rev(ranks))
-
-      df2 <- .x %>%
-      tidyr::separate(acc2, into=c("Acc",ranks), sep=";") %>%
-      dplyr::select(rev(ranks))
-      
-      #Get all shared ranks
-      logidf <- as.data.frame(df1 == df2)
-      keepvec <- unname(apply(logidf, 1, which.max))
-
-      colnames(logidf)[keepvec] %>%
-        table() %>%
-        as.data.frame() %>%
-        magrittr::set_colnames(c("rank", "freq")) %>%
-        mutate(total=sum(freq),
-               prob = freq / total , 
-               dist =unique(.x$dist)) %>%
-        dplyr::select(-total)
-    }) 
-  })%>%
-bind_rows(.id="source") %>%
-mutate(source = str_remove(basename(source), ".txt.gz"))
-
-# Plot out
-gg.lca <- lca %>%
-  dplyr::filter(rank %in% c("species", "genus", "family", "order")) %>%
-  mutate(rank = factor(rank, levels = c("species", "genus", "family", "order"))) %>%
-  ggplot(aes(x=dist, y=prob, colour = rank)) +
-  geom_line() +
-  base_theme + 
-  theme(legend.position = "bottom") +
-  labs(x = "Distance", y="LCA Probability")
-
-gg.lca
-
-pdf(file="fig/lca_probabilities.pdf", width = 8, height = 11 , paper="a4")
-  plot(gg.lca)
-try(dev.off(), silent=TRUE)
- 
-```
-
-# Sessioninfo
-```{r sessioninfo}
-sessionInfo()
 ```

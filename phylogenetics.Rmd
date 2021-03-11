@@ -1,15 +1,23 @@
 ---
-title: "phylogenetics"
+title: "Metabarcoding primer evaluation"
+subtitle: "phylogenetics"
+author: "Alexander Piper"
+date: "`r Sys.Date()`"
 output: html_document
+editor_options: 
+  chunk_output_type: console
 ---
 
-# Setup & Packages 
-
-```{r setup}
+```{r setup, include=FALSE}
 # Knitr global setup - change eval to true to run code
 library(knitr)
-knitr::opts_chunk$set(echo = TRUE, eval=FALSE, message=FALSE,error=FALSE,fig.show = "hold", fig.keep = "all")
+knitr::opts_chunk$set(echo = TRUE, eval=FALSE, message=FALSE,error=FALSE, fig.show = "hold", fig.keep = "all")
+opts_chunk$set(dev = 'png')
+```
 
+# Load Packages 
+
+```{r load packages}
 #Set required packages
 .cran_packages <- c("tidyverse",
                     "insect",
@@ -180,7 +188,7 @@ FastTree -gtr -cat 20 -constraints constraints_fulltree.fa -nt merged_final_noga
 ```
 
 
-# Make ultrametric & Date
+# Make ultrametric
 ```{r PATHd8}
 tree <- read.tree("reference/trees/constraint_order_bifurcating.nwk")
 

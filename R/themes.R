@@ -5,6 +5,7 @@ base_theme <- theme_minimal()+
     #strip.background = element_rect(colour = "black", fill = "lightgray"),
     strip.text = element_text(size=9, family = ""),
     axis.text.x =element_text(angle=45, hjust=1, vjust=1),
+    axis.ticks = element_line(colour = "grey20"),
     #axis.title.x=element_blank(),
     plot.background = element_blank(),
     text = element_text(size=9, family = ""),
