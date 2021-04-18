@@ -1,8 +1,8 @@
 # Analysis for Piper, Cogan, Cunningham & Blacket (In prep)
 
-This repository contains the code required for reproducing the analyses presented in our manuscript:
+This repository contains the code required for reproducing the analyses presented in our preprint:
 
-\*\* Coming Soon \*\*
+[Piper, A. M., Cogan, N. O. I., Cunningham, J. P., & Blacket, M. J. (2021). Computational Evaluation of DNA Metabarcoding for Universal Diagnostics of Invasive Insect Pests. BioRxiv.](https://www.biorxiv.org/content/10.1101/2021.03.16.435710v1)
 
 ## Analysis
 
