@@ -1,4 +1,4 @@
-# Analysis for Piper, Cogan, Cunningham & Blacket (In prep)
+# Computational Evaluation of DNA Metabarcoding for Universal Diagnostics of Invasive Insect Pests
 
 This repository contains the code required for reproducing the analyses presented in our preprint:
 
